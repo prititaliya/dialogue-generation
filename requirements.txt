@@ -1,0 +1,6 @@
+livekit-agents[assemblyai,silero,turn-detector]==1.2.17
+livekit-plugins-noise-cancellation==0.2.5
+livekit-plugins-speechmatics==1.2.17
+python-dotenv==1.2.1
+cryptography==46.0.3
+
