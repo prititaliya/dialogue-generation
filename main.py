@@ -1,9 +1,11 @@
 import os
+import sys
+import signal
 import logging
 import time
+import threading
 from collections.abc import AsyncIterable
 from typing import List, Dict, Tuple, Optional
-from collections import deque
 
 from dotenv import load_dotenv
 
@@ -28,13 +30,79 @@ load_dotenv(".env.local")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("diarizer")
 
+# Reduce verbosity of turn detector timeout errors (they're non-critical)
+# These timeouts happen when turn detection takes too long, but don't affect transcription
+logging.getLogger("livekit.agents.voice.audio_recognition").setLevel(logging.ERROR)
+logging.getLogger("livekit.plugins.turn_detector").setLevel(logging.ERROR)
+logging.getLogger("livekit.agents").setLevel(logging.WARNING)  # Reduce INFO level noise
+
 # ------------------------------------------------------------
 # Transcript state
 # ------------------------------------------------------------
-transcripts: List[Tuple[str, str]] = []                  # (Speaker N, text)
-speaker_label_map: Dict[str, str] = {}                   # sm speaker_id -> Speaker N
+transcripts: List[Tuple[str, str]] = []
+speaker_label_map: Dict[str, str] = {}
 next_speaker_num: int = 1
-recent_turns: deque = deque(maxlen=10)                   # optional
+shutdown_requested = False
+
+def save_transcripts():
+    """Save transcripts to a file."""
+    global transcripts
+    if not transcripts:
+        print("\n⚠️  No transcripts to save")
+        return
+    
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    filename = os.path.join(project_dir, f"transcript_{int(time.time())}.txt")
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("Full Transcript\n")
+            f.write("=" * 50 + "\n\n")
+            for speaker, text in transcripts:
+                f.write(f"{speaker}: {text}\n\n")
+        print(f"\n✅ Transcripts saved to: {os.path.basename(filename)}")
+        print(f"📁 Full path: {os.path.abspath(filename)}")
+        print(f"📊 Total entries: {len(transcripts)}")
+        return filename
+    except Exception as e:
+        logger.error(f"Failed to save transcripts: {e}", exc_info=True)
+        print(f"❌ Error saving transcripts: {e}")
+        return None
+
+def signal_handler(sig, frame):
+    """Handle shutdown signals gracefully."""
+    global shutdown_requested
+    print("\n\n🛑 Shutdown requested. Saving transcripts and exiting...")
+    shutdown_requested = True
+    save_transcripts()
+    sys.exit(0)
+
+def exit_command_listener():
+    """Background thread that listens for exit commands."""
+    global shutdown_requested
+    print("\n💡 Tip: Type 'quit', 'exit', 'q', or 'save' to save and exit (Ctrl+C also works)\n")
+    
+    while not shutdown_requested:
+        try:
+            user_input = input().strip().lower()
+            
+            if user_input in ['quit', 'exit', 'q']:
+                print("\n🛑 Exit command received. Saving transcripts and exiting...")
+                shutdown_requested = True
+                save_transcripts()
+                os._exit(0)
+            elif user_input == 'save':
+                print("\n💾 Manual save requested...")
+                save_transcripts()
+                print("✅ Save complete. Continue transcribing or type 'quit' to exit.\n")
+        except (EOFError, KeyboardInterrupt):
+            break
+        except Exception as e:
+            logger.error(f"Error in exit command listener: {e}")
+            break
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C (still works)
+signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 
 # ------------------------------------------------------------
 # Utilities
@@ -52,15 +120,13 @@ def label_for_speaker_id(speaker_id: Optional[str]) -> str:
 # Agent
 # ------------------------------------------------------------
 class DiarizationAgent(Agent):
-    def __init__(self, room: rtc.Room | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__(
             instructions=(
                 "You are a silent transcription agent. "
                 "Do not respond or speak; only transcribe user speech with speaker labels."
             ),
         )
-        self.room = room
-        self.last_turn_time: float = 0.0
 
     def stt_node(
         self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings
@@ -77,45 +143,57 @@ class DiarizationAgent(Agent):
                     spk = getattr(alt, "speaker_id", None)   # <-- canonical field
                     label = label_for_speaker_id(spk)
 
-                    # Debug: show raw type and speaker id coming from STT
+                    # Check if this is a final transcript
                     ev_type = getattr(ev, "type", None)
-                    ev_type_name = getattr(ev_type, "name", str(ev_type))
-                    logger.debug(f"SpeechEvent type={ev_type_name}, speaker_id={spk}, text='{text}'")
-
-                    if text.strip():
-                        # If event is final (FINAL_TRANSCRIPT), persist it; else, show interim
-                        if ev_type_name == "FINAL_TRANSCRIPT":
-                            transcripts.append((label, text))
+                    ev_type_name = getattr(ev_type, "name", str(ev_type)) if ev_type else None
+                    is_final = False
+                    
+                    # Only treat as final if explicitly marked as FINAL_TRANSCRIPT
+                    if ev_type_name and "FINAL" in ev_type_name.upper():
+                        is_final = True
+                    
+                    text_stripped = text.strip()
+                    if text_stripped:
+                        if is_final:
+                            # Final transcript - only store truly final ones
+                            # Check if this is an update to the last transcript from the same speaker
+                            updated_existing = False
+                            if transcripts:
+                                last_speaker, last_text = transcripts[-1]
+                                # If same speaker and new text contains the old text (it's an update/extension)
+                                if label == last_speaker and last_text in text_stripped:
+                                    transcripts[-1] = (label, text_stripped)
+                                    updated_existing = True
+                            
+                            if not updated_existing:
+                                if not transcripts or transcripts[-1][1] != text_stripped:
+                                    transcripts.append((label, text_stripped))
+                                    logger.info(f"Stored transcript {len(transcripts)}: {label} - {text_stripped[:50]}...")
+                            
+                            # Always display the final transcript
                             print(f"[Final] {label}: {text}")
                             lines = [f"{sp}: {t}" for sp, t in transcripts]
                             print("\n📝 Full Transcript so far:\n" + "\n".join(lines) + "\n")
+                            
+                            if len(transcripts) % 10 == 0 and len(transcripts) > 0:
+                                saved_file = save_transcripts()
+                                if saved_file:
+                                    print(f"💡 Auto-saved: {os.path.basename(saved_file)}")
                         else:
+                            # Interim transcript - just display, never store
                             print(f"[Interim] {label}: {text}")
 
-                # always yield back into pipeline
                 yield ev
 
         return _transcribe()
 
-    async def on_user_turn_completed(
-        self, turn_ctx: agents.ChatContext, new_message: agents.ChatMessage,
-    ) -> None:
-        """
-        Optional hook; diarization and persistence are handled inside stt_node.
-        """
-        self.last_turn_time = time.time()
-
-    def llm_node(
-        self, chat_ctx: agents.ChatContext, tools: list, model_settings: ModelSettings
-    ) -> AsyncIterable[str]:
+    def llm_node(self, chat_ctx: agents.ChatContext, tools: list, model_settings: ModelSettings) -> AsyncIterable[str]:
         async def _silent():
             if False:
                 yield ""
         return _silent()
 
-    def tts_node(
-        self, text: AsyncIterable[str], model_settings: ModelSettings
-    ) -> AsyncIterable[rtc.AudioFrame]:
+    def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings) -> AsyncIterable[rtc.AudioFrame]:
         async def _silent():
             async for _ in text:
                 pass
@@ -151,19 +229,34 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     session = AgentSession(
-        llm="google/gemini-2.5-flash",   # pipeline requirement; agent stays silent
+        llm="google/gemini-2.5-flash",
         stt=sm_stt,
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
 
-    await session.start(
-        room=ctx.room,
-        agent=DiarizationAgent(room=ctx.room),
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
-    )
+    try:
+        await session.start(
+            room=ctx.room,
+            agent=DiarizationAgent(),
+            room_input_options=RoomInputOptions(
+                noise_cancellation=noise_cancellation.BVC(),
+            ),
+        )
+    finally:
+        print("\n💾 Session ended. Saving transcripts...")
+        save_transcripts()
 
 if __name__ == "__main__":
-    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    threading.Thread(target=exit_command_listener, daemon=True).start()
+    
+    try:
+        agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    except KeyboardInterrupt:
+        print("\n\n🛑 Interrupted by user. Saving transcripts...")
+        save_transcripts()
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Error occurred: {e}")
+        save_transcripts()
+        raise
