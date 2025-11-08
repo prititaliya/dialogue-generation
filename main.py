@@ -6,6 +6,8 @@ import time
 import threading
 from collections.abc import AsyncIterable
 from typing import List, Dict, Tuple, Optional
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 from dotenv import load_dotenv
 
@@ -18,6 +20,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.plugins import speechmatics
 import asyncio
 stop_flag = asyncio.Event()
+handoff_flag = asyncio.Event()
 load_dotenv(".env.local")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("diarizer")
@@ -53,13 +56,73 @@ def label_for_speaker_id(speaker_id: Optional[str]) -> str:
 # ------------------------------------------------------------
 # Agent
 # ------------------------------------------------------------
+
+class sampingAgent(Agent):
+    global speaker_label_map
+
+    def __init__(self, ctx: agents.JobContext) -> None:
+        super().__init__(
+            instructions=(
+                "You are doing sampling of unique speaker's name and match with thier speaker_id,  "
+            ),
+        )
+        self.ctx = ctx
+        self.done_sampling = False
+
+    def stt_node(self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings) -> AsyncIterable[stt.SpeechEvent | str]:
+        async def _transcribe():            
+            async for ev in Agent.default.stt_node(self, audio, model_settings):
+                if isinstance(ev, stt.SpeechEvent) and ev.alternatives:
+                    if ev.type and "FINAL" in ev.type.upper():
+                        
+                        alt = ev.alternatives[0]  # livekit.agents.stt.SpeechData
+                        text = alt.text or ""
+                        print(text)
+                        if "stop sampling" in text.lower():
+                            self.done_sampling = True
+                            logger.info("📢 'Done sampling' detected - setting handoff flag...")
+                            # Set the handoff flag to trigger handoff in entrypoint
+                            handoff_flag.set()
+
+                        else:
+                            spk = getattr(alt, "speaker_id", None)   # <-- canonical field
+                            if spk not in speaker_label_map:
+                                class responseSchema(BaseModel):
+                                    speaker_name: str
+                                    speaker_id: int
+                                print(text)
+                                chatModel = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(responseSchema)
+                                response = chatModel.invoke(f"for the given text {text}, please give me the unique speaker's name and match with thier speaker_id which is {spk} if speaker name is not mentioned in the text, please give me the name as 'unknown'")
+                                print(response)
+                                if response.speaker_name == "unknown":
+                                    continue
+                                else:
+                                    print(f"Speaker name: {response.speaker_name} and speaker id: {spk}")
+                                    speaker_label_map[spk] = response.speaker_name
+                        
+                        yield ev
+        return _transcribe()
+
+    def llm_node(self, chat_ctx: agents.ChatContext, tools: list, model_settings: ModelSettings) -> AsyncIterable[str]:
+        async def _silent():
+            if False:
+                yield ""
+        return _silent()
+
+    def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings) -> AsyncIterable[rtc.AudioFrame]:
+        async def _silent():
+            async for _ in text:
+                pass
+            if False:
+                yield rtc.AudioFrame()
+        return _silent()
 class DiarizationAgent(Agent):
     def __init__(self,ctx: agents.JobContext) -> None:
         super().__init__(
             instructions=(
                 "You are a silent transcription agent. "
                 "Do not respond or speak; only transcribe user speech with speaker labels."
-            ),
+            )
         )
         self.ctx = ctx
     def stt_node(
@@ -69,9 +132,11 @@ class DiarizationAgent(Agent):
         Consume SpeechEvents from the base STT node and print transcripts with speaker labels.
         Correctly reads diarization from alt.speaker_id for both partial and final events.
         """
+        print("diarization agent initialized")
         async def _transcribe():
             async for ev in Agent.default.stt_node(self, audio, model_settings):
                 if isinstance(ev, stt.SpeechEvent) and ev.alternatives:
+                    print(ev)
                     alt = ev.alternatives[0]  # livekit.agents.stt.SpeechData
                     text = alt.text or ""
                     spk = getattr(alt, "speaker_id", None)   # <-- canonical field
@@ -198,22 +263,83 @@ async def entrypoint(ctx: agents.JobContext):
 
     ctx.add_shutdown_callback(on_shutdown)
 
+    # Reset handoff flag at the start
+    handoff_flag.clear()
+    
+    # Start with sampling agent
     await session.start(
         room=ctx.room,
-        agent=DiarizationAgent(ctx),
+        agent=sampingAgent(ctx),
         room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
-    # Wait for stop signal or remote room end
-    logger.info("AgentSession started. Waiting for stop command or session end...")
-    try:
-        await stop_flag.wait()
+    logger.info("AgentSession started with sampling agent. Waiting for 'done sampling' or stop command...")
+    
+    # Wait for either handoff or stop signal
+    handoff_task = asyncio.create_task(handoff_flag.wait())
+    stop_task = asyncio.create_task(stop_flag.wait())
+    
+    done, pending = await asyncio.wait(
+        [handoff_task, stop_task],
+        return_when=asyncio.FIRST_COMPLETED
+    )
+    
+    # Cancel the pending task
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    
+    if handoff_flag.is_set():
+        logger.info("🔄 Handoff flag triggered - switching to DiarizationAgent...")
+        try:
+            # Close the current session
+            await session.aclose()
+            logger.info("Closed sampling session")
+            
+            # Create a new session with DiarizationAgent
+            new_session = AgentSession(
+                llm="google/gemini-2.5-flash",
+                stt=sm_stt,
+                vad=silero.VAD.load(),
+                turn_detection=MultilingualModel(),
+            )
+            
+            @new_session.on("close")
+            def _on_close_new(ev=None):
+                async def _close():
+                    logger.info("DiarizationAgent session closed")
+                asyncio.create_task(_close())
+            
+            await new_session.start(
+                room=ctx.room,
+                agent=DiarizationAgent(ctx),
+                room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
+            )
+            
+            logger.info("✅ Successfully handed off to DiarizationAgent")
+            
+            # Now wait for stop signal
+            try:
+                await stop_flag.wait()
+                logger.info("Stop flag triggered - shutting down session")
+            finally:
+                logger.info("Closing diarization session and shutting down...")
+                await new_session.aclose()
+                ctx.shutdown(reason="Session ended")
+        except Exception as e:
+            logger.error(f"❌ Error during handoff: {e}")
+            await session.aclose()
+            ctx.shutdown(reason=f"Handoff failed: {e}")
+    else:
+        # Stop flag was triggered
         logger.info("Stop flag triggered - shutting down session")
-    finally:
-        # Close the session first, then shutdown the job
-        logger.info("Closing session and shutting down...")
-        await session.aclose()  # ensure pipelines are torn down
-        ctx.shutdown(reason="Session ended")  # same JobContext instance
+        try:
+            await session.aclose()
+        finally:
+            ctx.shutdown(reason="Session ended")
     
 
 if __name__ == "__main__":
