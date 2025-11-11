@@ -2,6 +2,147 @@
 
 A real-time dialogue transcription system with WebRTC integration, featuring automatic speaker identification and multi-speaker conversation transcription with speaker labels.
 
+## 🚀 How to Run the Website for Transcription
+
+Follow these steps to get the transcription website up and running:
+
+### Step 1: Install Prerequisites
+
+Make sure you have:
+- **Python 3.12+** installed
+- **Node.js 18+** and **npm** installed
+- **LiveKit server** running (local or cloud)
+- API keys for:
+  - **Speechmatics** (for speech-to-text and diarization)
+  - **OpenAI** (for speaker name extraction)
+
+### Step 2: Backend Setup
+
+1. **Navigate to backend directory:**
+   ```bash
+   cd backend
+   ```
+
+2. **Install Python dependencies:**
+   ```bash
+   # Using uv (recommended)
+   uv sync
+   
+   # Or using pip
+   pip install -r requirements.txt
+   ```
+
+3. **Create `.env.local` file in the `backend` directory:**
+   ```bash
+   SPEECHMATICS_API_KEY=your_speechmatics_api_key_here
+   OPENAI_API_KEY=your_openai_api_key_here
+   LIVEKIT_URL=ws://localhost:7880
+   LIVEKIT_API_KEY=your_livekit_api_key
+   LIVEKIT_API_SECRET=your_livekit_api_secret
+   ```
+
+### Step 3: Frontend Setup
+
+1. **Navigate to frontend directory:**
+   ```bash
+   cd frontend
+   ```
+
+2. **Install Node.js dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Create `.env` file in the `frontend` directory:**
+   ```bash
+   VITE_API_URL=ws://localhost:8000
+   VITE_LIVEKIT_URL=ws://localhost:7880
+   ```
+
+### Step 4: Start All Services
+
+You need **3 terminal windows** running simultaneously:
+
+#### Terminal 1: API Server
+```bash
+cd backend
+python start_server.py
+```
+
+**Expected output:**
+```
+🚀 API server started on http://localhost:8000
+📡 WebSocket endpoint: ws://localhost:8000/ws/transcripts
+```
+
+#### Terminal 2: LiveKit Agent
+```bash
+cd backend
+python main.py dev
+```
+
+**Expected output:** Agent will start and wait for room connections.
+
+#### Terminal 3: Frontend Development Server
+```bash
+cd frontend
+npm run dev
+```
+
+**Expected output:**
+```
+  VITE v7.x.x  ready in xxx ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+```
+
+### Step 5: Access the Website
+
+1. **Open your browser** and navigate to: `http://localhost:5173`
+
+2. **Connect to a LiveKit room:**
+   - Enter a room name (e.g., "transcription-room")
+   - Enter a LiveKit access token (see [Getting a LiveKit Token](#getting-a-livekit-token) below)
+   - Click "Connect"
+
+3. **Start transcription:**
+   - **Sampling Phase**: Speakers should introduce themselves (e.g., "Hi, I'm John")
+   - The system will automatically identify and map speaker names
+   - When ready, say **"stop sampling"** to begin transcription
+   - **Transcription Phase**: Real-time transcripts will appear in the web UI with speaker labels
+   - Say **"stop recording"** to end the session
+
+### Quick Checklist
+
+Before starting, ensure:
+- ✅ All 3 terminals are running (API server, LiveKit agent, frontend)
+- ✅ `.env.local` file exists in `backend/` with all required API keys
+- ✅ `.env` file exists in `frontend/` with correct URLs
+- ✅ LiveKit server is running and accessible
+- ✅ Browser is open at `http://localhost:5173`
+
+### Getting a LiveKit Token
+
+You'll need a LiveKit access token to connect to a room. You can:
+
+1. **Use the LiveKit dashboard** to generate tokens
+2. **Use the LiveKit token API**
+3. **Create a simple token server endpoint**
+
+Example token generation (Node.js):
+```javascript
+import { AccessToken } from 'livekit-server-sdk';
+
+const token = new AccessToken(apiKey, apiSecret, {
+  identity: 'user-' + Math.random().toString(36).substring(7),
+});
+token.addGrant({ roomJoin: true, room: 'your-room-name' });
+const jwt = await token.toJwt();
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -39,110 +180,23 @@ dialogue-generation/
   - Speechmatics (for STT and diarization)
   - OpenAI (for speaker name extraction)
 
-## Quick Start
-
-### Backend Setup
-
-1. Navigate to the backend directory:
-```bash
-cd backend
-```
-
-2. Install dependencies:
-```bash
-# Using uv (recommended)
-uv sync
-
-# Or using pip
-pip install -r requirements.txt
-```
-
-3. Set up environment variables in `.env.local`:
-```bash
-SPEECHMATICS_API_KEY=your_speechmatics_api_key_here
-OPENAI_API_KEY=your_openai_api_key_here
-LIVEKIT_URL=ws://localhost:7880
-LIVEKIT_API_KEY=your_livekit_api_key
-LIVEKIT_API_SECRET=your_livekit_api_secret
-```
-
-4. Start the API server (keep this running):
-```bash
-python start_server.py
-```
-
-You should see:
-```
-🚀 API server started on http://localhost:8000
-📡 WebSocket endpoint: ws://localhost:8000/ws/transcripts
-```
-
-5. In **another terminal**, start the LiveKit agent:
-```bash
-cd backend
-python main.py dev
-```
-
-**Important:** You need **3 terminals** running:
-1. API Server (`python start_server.py`)
-2. LiveKit Agent (`python main.py dev`)
-3. Frontend (`npm run dev` in frontend folder)
-
-### Frontend Setup
-
-1. Navigate to the frontend directory:
-```bash
-cd frontend
-```
-
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Create `.env` file:
-```bash
-VITE_API_URL=ws://localhost:8000
-VITE_LIVEKIT_URL=ws://localhost:7880
-```
-
-4. Start the development server:
-```bash
-npm run dev
-```
-
-5. Open `http://localhost:5173` in your browser
+> **📖 For detailed setup instructions, see [How to Run the Website for Transcription](#-how-to-run-the-website-for-transcription) above.**
 
 ## Usage
 
-### Workflow
+### Transcription Workflow
 
-1. **Start Services**: Start both the backend API server and LiveKit agent
-2. **Open Frontend**: Open the web application in your browser
-3. **Connect to Room**: Enter a room name and LiveKit access token, then click "Connect"
-4. **Sampling Phase**: The system will automatically identify speakers as they introduce themselves
-5. **Say "stop sampling"**: When ready, say "stop sampling" to begin transcription
-6. **Transcription Phase**: Real-time transcripts will appear in the web UI with speaker labels
-7. **Stop Recording**: Say "stop recording" to end the session
+Once all services are running and you've opened the website:
 
-### Getting a LiveKit Token
-
-You'll need a LiveKit access token to connect to a room. You can:
-
-1. Use the LiveKit dashboard to generate tokens
-2. Use the LiveKit token API
-3. Create a simple token server endpoint
-
-Example token generation (Node.js):
-```javascript
-import { AccessToken } from 'livekit-server-sdk';
-
-const token = new AccessToken(apiKey, apiSecret, {
-  identity: 'user-' + Math.random().toString(36).substring(7),
-});
-token.addGrant({ roomJoin: true, room: 'your-room-name' });
-const jwt = await token.toJwt();
-```
+1. **Connect to Room**: Enter a room name and LiveKit access token, then click "Connect"
+2. **Sampling Phase**: Speakers should introduce themselves (e.g., "Hi, I'm John")
+   - The system will automatically identify and map speaker names to speaker IDs
+3. **Say "stop sampling"**: When ready, say "stop sampling" to begin transcription
+4. **Transcription Phase**: Real-time transcripts will appear in the web UI with speaker labels
+   - Format: `[Final] Speaker Name: transcript text`
+   - Interim (partial) transcripts: `[Interim] Speaker Name: partial text`
+5. **Stop Recording**: Say "stop recording" to end the session
+   - Transcripts will be saved automatically
 
 ## Architecture
 
