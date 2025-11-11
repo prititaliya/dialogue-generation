@@ -6,7 +6,6 @@ import time
 import threading
 from collections.abc import AsyncIterable
 from typing import List, Dict, Tuple, Optional
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 from dotenv import load_dotenv
@@ -19,6 +18,14 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from livekit.plugins import speechmatics
 import asyncio
+from api_server import get_transcript_manager
+
+# Import for handling microphone errors (agent uses room audio only)
+try:
+    from sounddevice import PortAudioError
+except ImportError:
+    PortAudioError = None
+
 stop_flag = asyncio.Event()
 handoff_flag = asyncio.Event()
 load_dotenv(".env.local")
@@ -38,6 +45,9 @@ transcripts: List[Tuple[str, str]] = []
 speaker_label_map: Dict[str, str] = {}
 next_speaker_num: int = 1
 shutdown_requested = False
+
+# Get transcript manager for WebSocket broadcasting
+transcript_manager = get_transcript_manager()
 
 
 
@@ -87,6 +97,9 @@ class sampingAgent(Agent):
                         else:
                             spk = getattr(alt, "speaker_id", None)   # <-- canonical field
                             if spk not in speaker_label_map:
+                                # Lazy import to avoid slow transformers import during multiprocessing
+                                from langchain_openai import ChatOpenAI
+                                
                                 class responseSchema(BaseModel):
                                     speaker_name: str
                                     speaker_id: int
@@ -99,6 +112,8 @@ class sampingAgent(Agent):
                                 else:
                                     print(f"Speaker name: {response.speaker_name} and speaker id: {spk}")
                                     speaker_label_map[spk] = response.speaker_name
+                                    # Update transcript manager
+                                    transcript_manager.update_speaker_label(spk, response.speaker_name)
                         
                         yield ev
         return _transcribe()
@@ -185,9 +200,18 @@ class DiarizationAgent(Agent):
                             lines = [f"{sp}: {t}" for sp, t in transcripts]
                             print("\n📝 Full Transcript so far:\n" + "\n".join(lines) + "\n")
                             
+                            # Broadcast to WebSocket clients
+                            asyncio.create_task(
+                                transcript_manager.broadcast_transcript(label, text_stripped, is_final=True)
+                            )
+                            
                         else:
                             # Interim transcript - just display, never store
                             print(f"[Interim] {label}: {text}")
+                            # Broadcast interim transcript too
+                            asyncio.create_task(
+                                transcript_manager.broadcast_transcript(label, text_stripped, is_final=False)
+                            )
 
                 yield ev
 
@@ -244,104 +268,141 @@ async def entrypoint(ctx: agents.JobContext):
         turn_detection=MultilingualModel(),
     )
 
-    # await session.start(
+    # Start with sampling agent
+# Note: Agent only uses room audio input, local microphone errors can be ignored
+    try:
+        await session.start(
+            room=ctx.room,
+            agent=DiarizationAgent(ctx),
+            room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
+        )
+    except Exception as e:
+        # Ignore PortAudio errors for local microphone - agent uses room audio only
+        error_type = type(e).__name__
+        if PortAudioError and isinstance(e, PortAudioError):
+            logger.warning(f"Ignoring local microphone error (agent uses room audio only): {e}")
+            # Session should still work with room audio, continue
+        elif "PortAudio" in error_type or "sounddevice" in str(e).lower():
+            logger.warning(f"Ignoring local microphone error (agent uses room audio only): {e}")
+            # Session should still work with room audio, continue
+        else:
+            raise
+     # optional: observe close events for diagnostics
+    # @session.on("close")
+    # def _on_close(ev=None):
+    #     async def _close():
+    #         logger.info("AgentSession closed")
+    #     asyncio.create_task(_close())
+
+    # async def on_shutdown(reason: str = ""):
+    #     logger.info(f"shutdown hook fired: {reason}")
+
+    # ctx.add_shutdown_callback(on_shutdown)
+
+    # # Reset handoff flag at the start
+    # handoff_flag.clear()
+    
+    # # Start with sampling agent
+    # # Note: Agent only uses room audio input, local microphone errors can be ignored
+    # try:
+    #     await session.start(
     #         room=ctx.room,
     #         agent=DiarizationAgent(ctx),
-    #         room_input_options=RoomInputOptions(
-    #             noise_cancellation=noise_cancellation.BVC(),
-    #         ),
+    #         room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     #     )
-     # optional: observe close events for diagnostics
-    @session.on("close")
-    def _on_close(ev=None):
-        async def _close():
-            logger.info("AgentSession closed")
-        asyncio.create_task(_close())
+    # except Exception as e:
+    #     # Ignore PortAudio errors for local microphone - agent uses room audio only
+    #     error_type = type(e).__name__
+    #     if PortAudioError and isinstance(e, PortAudioError):
+    #         logger.warning(f"Ignoring local microphone error (agent uses room audio only): {e}")
+    #         # Session should still work with room audio, continue
+    #     elif "PortAudio" in error_type or "sounddevice" in str(e).lower():
+    #         logger.warning(f"Ignoring local microphone error (agent uses room audio only): {e}")
+    #         # Session should still work with room audio, continue
+    #     else:
+    #         raise
 
-    async def on_shutdown(reason: str = ""):
-        logger.info(f"shutdown hook fired: {reason}")
-
-    ctx.add_shutdown_callback(on_shutdown)
-
-    # Reset handoff flag at the start
-    handoff_flag.clear()
+    # logger.info("AgentSession started with sampling agent. Waiting for 'done sampling' or stop command...")
     
-    # Start with sampling agent
-    await session.start(
-        room=ctx.room,
-        agent=sampingAgent(ctx),
-        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
-    )
-
-    logger.info("AgentSession started with sampling agent. Waiting for 'done sampling' or stop command...")
+    # # Wait for either handoff or stop signal
+    # # handoff_task = asyncio.create_task(handoff_flag.wait())
+    # # stop_task = asyncio.create_task(stop_flag.wait())
     
-    # Wait for either handoff or stop signal
-    handoff_task = asyncio.create_task(handoff_flag.wait())
-    stop_task = asyncio.create_task(stop_flag.wait())
+    # # done, pending = await asyncio.wait(
+    # #     [handoff_task, stop_task],
+    # #     return_when=asyncio.FIRST_COMPLETED
+    # # )
     
-    done, pending = await asyncio.wait(
-        [handoff_task, stop_task],
-        return_when=asyncio.FIRST_COMPLETED
-    )
+    # # Cancel the pending task
+    # for task in pending:
+    #     task.cancel()
+    #     try:
+    #         await task
+    #     except asyncio.CancelledError:
+    #         pass
     
-    # Cancel the pending task
-    for task in pending:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    
-    if handoff_flag.is_set():
-        logger.info("🔄 Handoff flag triggered - switching to DiarizationAgent...")
-        try:
-            # Close the current session
-            await session.aclose()
-            logger.info("Closed sampling session")
+    # if handoff_flag.is_set():
+    #     logger.info("🔄 Handoff flag triggered - switching to DiarizationAgent...")
+    #     try:
+    #         # Close the current session
+    #         await session.aclose()
+    #         logger.info("Closed sampling session")
             
-            # Create a new session with DiarizationAgent
-            new_session = AgentSession(
-                llm="google/gemini-2.5-flash",
-                stt=sm_stt,
-                vad=silero.VAD.load(),
-                turn_detection=MultilingualModel(),
-            )
+    #         # Create a new session with DiarizationAgent
+    #         new_session = AgentSession(
+    #             llm="google/gemini-2.5-flash",
+    #             stt=sm_stt,
+    #             vad=silero.VAD.load(),
+    #             turn_detection=MultilingualModel(),
+    #         )
             
-            @new_session.on("close")
-            def _on_close_new(ev=None):
-                async def _close():
-                    logger.info("DiarizationAgent session closed")
-                asyncio.create_task(_close())
+    #         @new_session.on("close")
+    #         def _on_close_new(ev=None):
+    #             async def _close():
+    #                 logger.info("DiarizationAgent session closed")
+    #             asyncio.create_task(_close())
             
-            await new_session.start(
-                room=ctx.room,
-                agent=DiarizationAgent(ctx),
-                room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
-            )
+    #         # Note: Agent only uses room audio input, local microphone errors can be ignored
+    #         try:
+    #             await new_session.start(
+    #                 room=ctx.room,
+    #                 agent=DiarizationAgent(ctx),
+    #                 room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
+    #             )
+    #         except Exception as e:
+    #             # Ignore PortAudio errors for local microphone - agent uses room audio only
+    #             error_type = type(e).__name__
+    #             if PortAudioError and isinstance(e, PortAudioError):
+    #                 logger.warning(f"Ignoring local microphone error (agent uses room audio only): {e}")
+    #                 # Session should still work with room audio, continue
+    #             elif "PortAudio" in error_type or "sounddevice" in str(e).lower():
+    #                 logger.warning(f"Ignoring local microphone error (agent uses room audio only): {e}")
+    #                 # Session should still work with room audio, continue
+    #             else:
+    #                 raise
             
-            logger.info("✅ Successfully handed off to DiarizationAgent")
+    #         logger.info("✅ Successfully handed off to DiarizationAgent")
             
-            # Now wait for stop signal
-            try:
-                await stop_flag.wait()
-                logger.info("Stop flag triggered - shutting down session")
-            finally:
-                logger.info("Closing diarization session and shutting down...")
-                await new_session.aclose()
-                ctx.shutdown(reason="Session ended")
-        except Exception as e:
-            logger.error(f"❌ Error during handoff: {e}")
-            await session.aclose()
-            ctx.shutdown(reason=f"Handoff failed: {e}")
-    else:
-        # Stop flag was triggered
-        logger.info("Stop flag triggered - shutting down session")
-        try:
-            await session.aclose()
-        finally:
-            ctx.shutdown(reason="Session ended")
+    #         # Now wait for stop signal
+    #         try:
+    #             await stop_flag.wait()
+    #             logger.info("Stop flag triggered - shutting down session")
+    #         finally:
+    #             logger.info("Closing diarization session and shutting down...")
+    #             await new_session.aclose()
+    #             ctx.shutdown(reason="Session ended")
+    #     except Exception as e:
+    #         logger.error(f"❌ Error during handoff: {e}")
+    #         await session.aclose()
+    #         ctx.shutdown(reason=f"Handoff failed: {e}")
+    # else:
+    #     # Stop flag was triggered
+    #     logger.info("Stop flag triggered - shutting down session")
+    #     try:
+    #         await session.aclose()
+    #     finally:
+    #         ctx.shutdown(reason="Session ended")
     
 
 if __name__ == "__main__":
-   
     agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))

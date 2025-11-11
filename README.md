@@ -1,217 +1,317 @@
 # Dialogue Generation System
 
-A two-phase real-time dialogue transcription system that automatically identifies speakers and transcribes multi-speaker conversations with speaker labels.
+A real-time dialogue transcription system with WebRTC integration, featuring automatic speaker identification and multi-speaker conversation transcription with speaker labels.
 
-## Overview
+## Project Structure
 
-This system uses LiveKit agents to:
-1. **Sampling Phase**: Automatically identify and map speaker names to speaker IDs using AI
-2. **Diarization Phase**: Transcribe conversations with proper speaker labels
+```
+dialogue-generation/
+├── backend/          # Python backend with LiveKit agents
+│   ├── main.py       # LiveKit agent entrypoint
+│   ├── api_server.py # FastAPI server with WebSocket
+│   ├── start_server.py # Server startup script
+│   └── ...
+├── frontend/         # React frontend application
+│   ├── src/
+│   │   ├── components/
+│   │   ├── services/
+│   │   └── ...
+│   └── ...
+└── README.md
+```
 
 ## Features
 
 - 🎤 Real-time speech-to-text transcription
 - 👥 Automatic speaker diarization (identifies who said what)
 - 🤖 AI-powered speaker name extraction
-- 📝 Real-time transcript display
+- 📝 Real-time transcript display in web UI
+- 🔄 WebSocket streaming for live updates
+- 🎥 WebRTC integration with LiveKit
 - 💾 Automatic transcript saving
-- 🔄 Seamless agent handoff between phases
 
 ## Prerequisites
 
 - Python 3.12 or higher
+- Node.js 18+ and npm
 - LiveKit server (local or cloud)
 - API keys for:
   - Speechmatics (for STT and diarization)
   - OpenAI (for speaker name extraction)
 
-## Installation
+## Quick Start
 
-1. **Clone the repository** (if applicable) or navigate to the project directory:
-   ```bash
-   cd dialogue-generation
-   ```
+### Backend Setup
 
-2. **Install dependencies** using `uv` (recommended) or `pip`:
-   ```bash
-   # Using uv (recommended)
-   uv sync
-   
-   # Or using pip
-   pip install -r requirements.txt
-   ```
-
-3. **Set up environment variables**:
-   Create a `.env.local` file in the project root:
-   ```bash
-   SPEECHMATICS_API_KEY=your_speechmatics_api_key_here
-   OPENAI_API_KEY=your_openai_api_key_here
-   ```
-
-## Configuration
-
-### Required Environment Variables
-
-- `SPEECHMATICS_API_KEY`: Your Speechmatics API key for speech-to-text and diarization
-- `OPENAI_API_KEY`: Your OpenAI API key for speaker name extraction
-
-### Optional Configuration
-
-You can customize the Speechmatics STT settings in `main.py`:
-- `max_speakers`: Maximum number of speakers to detect
-- `diarization_sensitivity`: Sensitivity of speaker detection (0.0-1.0)
-- `prefer_current_speaker`: Prefer the current active speaker
-- `language`: Language code (default: "en")
-
-## Usage
-
-### Starting the Agent
-
-Run the main script:
+1. Navigate to the backend directory:
 ```bash
+cd backend
+```
+
+2. Install dependencies:
+```bash
+# Using uv (recommended)
+uv sync
+
+# Or using pip
+pip install -r requirements.txt
+```
+
+3. Set up environment variables in `.env.local`:
+```bash
+SPEECHMATICS_API_KEY=your_speechmatics_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=your_livekit_api_key
+LIVEKIT_API_SECRET=your_livekit_api_secret
+```
+
+4. Start the API server (keep this running):
+```bash
+python start_server.py
+```
+
+You should see:
+```
+🚀 API server started on http://localhost:8000
+📡 WebSocket endpoint: ws://localhost:8000/ws/transcripts
+```
+
+5. In **another terminal**, start the LiveKit agent:
+```bash
+cd backend
 python main.py dev
 ```
 
-Or if using LiveKit cloud:
+**Important:** You need **3 terminals** running:
+1. API Server (`python start_server.py`)
+2. LiveKit Agent (`python main.py dev`)
+3. Frontend (`npm run dev` in frontend folder)
+
+### Frontend Setup
+
+1. Navigate to the frontend directory:
 ```bash
-python main.py start
+cd frontend
 ```
+
+2. Install dependencies:
+```bash
+npm install
+```
+
+3. Create `.env` file:
+```bash
+VITE_API_URL=ws://localhost:8000
+VITE_LIVEKIT_URL=ws://localhost:7880
+```
+
+4. Start the development server:
+```bash
+npm run dev
+```
+
+5. Open `http://localhost:5173` in your browser
+
+## Usage
 
 ### Workflow
 
-#### Phase 1: Sampling Agent
+1. **Start Services**: Start both the backend API server and LiveKit agent
+2. **Open Frontend**: Open the web application in your browser
+3. **Connect to Room**: Enter a room name and LiveKit access token, then click "Connect"
+4. **Sampling Phase**: The system will automatically identify speakers as they introduce themselves
+5. **Say "stop sampling"**: When ready, say "stop sampling" to begin transcription
+6. **Transcription Phase**: Real-time transcripts will appear in the web UI with speaker labels
+7. **Stop Recording**: Say "stop recording" to end the session
 
-1. **Start the agent** - The system begins in sampling mode
-2. **Speak naturally** - As different speakers talk, the system will:
-   - Detect new speakers by their `speaker_id`
-   - Extract speaker names from the conversation using AI
-   - Map speaker names to their IDs
-   - Display: `Speaker name: [name] and speaker id: [id]`
-3. **End sampling** - When you're ready to start transcription, say:
-   ```
-   "stop sampling"
-   ```
+### Getting a LiveKit Token
 
-#### Phase 2: Diarization Agent
+You'll need a LiveKit access token to connect to a room. You can:
 
-1. **Automatic handoff** - The system automatically switches to transcription mode
-2. **Real-time transcription** - The system will:
-   - Transcribe all speech in real-time
-   - Label each utterance with the speaker's name
-   - Display transcripts in the format: `[Final] Speaker Name: transcript text`
-   - Show interim (partial) transcripts as: `[Interim] Speaker Name: partial text`
-3. **Stop recording** - To end the session, say:
-   ```
-   "stop recording"
-   or
-   "stop the recording"
-   ```
+1. Use the LiveKit dashboard to generate tokens
+2. Use the LiveKit token API
+3. Create a simple token server endpoint
 
-### Output
+Example token generation (Node.js):
+```javascript
+import { AccessToken } from 'livekit-server-sdk';
 
-- **Console Output**: Real-time transcripts are displayed in the terminal
-- **Transcript File**: When you say "stop recording", a `transcript.txt` file is created with:
-  - All final transcripts with speaker labels
-  - The stop command that ended the session
-
-### Example Session
-
-```
-# Phase 1: Sampling
-[User speaks] "Hi, I'm John and this is my colleague Sarah"
-Speaker name: John and speaker id: spk_0
-Speaker name: Sarah and speaker id: spk_1
-
-[User says] "stop sampling"
-📢 'Done sampling' detected - setting handoff flag...
-🔄 Handoff flag triggered - switching to DiarizationAgent...
-✅ Successfully handed off to DiarizationAgent
-
-# Phase 2: Transcription
-[Final] John: So, let's discuss the project timeline
-[Final] Sarah: I think we should aim for Q2 delivery
-[Final] John: That sounds reasonable
-
-[User says] "stop recording"
-🛑 STOP COMMAND DETECTED! Stopping recording...
+const token = new AccessToken(apiKey, apiSecret, {
+  identity: 'user-' + Math.random().toString(36).substring(7),
+});
+token.addGrant({ roomJoin: true, room: 'your-room-name' });
+const jwt = await token.toJwt();
 ```
 
-## How It Works
+## Architecture
 
-### Architecture
+### Backend
 
-1. **SamplingAgent**:
-   - Listens for speech and detects new speakers
-   - Uses OpenAI GPT-4o-mini to extract speaker names from context
-   - Maps speaker names to speaker IDs
-   - Ignores speakers with "unknown" names
-   - Triggers handoff when "stop sampling" is detected
+- **LiveKit Agent** (`main.py`): Processes audio from LiveKit rooms, performs speaker diarization, and extracts speaker names
+- **FastAPI Server** (`api_server.py`): Provides WebSocket endpoint for real-time transcript streaming
+- **Transcript Manager**: Manages transcript state and broadcasts to connected clients
 
-2. **DiarizationAgent**:
-   - Transcribes all speech in real-time
-   - Uses the speaker label map from the sampling phase
-   - Displays transcripts with proper speaker labels
-   - Saves transcripts to file when stopped
+### Frontend
 
-### Speaker Identification
+- **LiveKit Service**: Handles WebRTC connection to LiveKit rooms
+- **Transcript Service**: Connects to backend WebSocket for transcript updates
+- **React Components**: UI for room connection and transcript display
 
-The system uses AI to extract speaker names from the conversation context. For example:
-- If someone says "Hi, I'm Alice", the system will identify that speaker as "Alice"
-- If a name isn't mentioned, it returns "unknown" and skips that speaker
-- Speaker IDs are automatically assigned by Speechmatics diarization
+## API Endpoints
+
+- `GET /` - API server status
+- `GET /health` - Health check
+- `GET /transcripts` - Get all stored transcripts
+- `WS /ws/transcripts` - WebSocket endpoint for real-time transcript streaming
+
+## Configuration
+
+### Backend Environment Variables
+
+- `SPEECHMATICS_API_KEY`: Required - Speechmatics API key
+- `OPENAI_API_KEY`: Required - OpenAI API key
+- `LIVEKIT_URL`: LiveKit server URL (default: `ws://localhost:7880`)
+- `LIVEKIT_API_KEY`: LiveKit API key
+- `LIVEKIT_API_SECRET`: LiveKit API secret
+
+### Frontend Environment Variables
+
+- `VITE_API_URL`: Backend WebSocket URL (default: `ws://localhost:8000`)
+- `VITE_LIVEKIT_URL`: LiveKit server URL (default: `ws://localhost:7880`)
 
 ## Troubleshooting
 
-### Common Issues
+### WebSocket Connection Issues
+
+**Symptom:** Frontend shows "WebSocket Disconnected" or connection fails
+
+**Step 1: Verify API Server is Running**
+```bash
+# Check if port 8000 is listening
+lsof -i :8000
+
+# Or test the health endpoint
+curl http://localhost:8000/health
+```
+
+**Expected:** `{"status":"healthy"}`
+
+**If not running:**
+```bash
+cd backend
+python start_server.py
+```
+
+**Step 2: Test WebSocket Connection**
+```bash
+cd backend
+python test_websocket.py
+```
+
+**Expected output:**
+```
+Connecting to ws://localhost:8000/ws/transcripts...
+✅ Connected successfully!
+```
+
+**Step 3: Check Browser Console**
+1. Open browser DevTools (F12)
+2. Go to Console tab
+3. Look for:
+   - `Attempting to connect to: ws://localhost:8000/ws/transcripts`
+   - `✅ WebSocket connected` (success)
+   - Error messages (failure)
+
+**Common WebSocket Errors:**
+- **Connection refused (code 1006)**: API server not running
+- **Connection closed immediately**: Check CORS settings in `api_server.py`
+- **Max reconnection attempts**: Server crashed or port blocked
+
+### Backend Issues
 
 1. **"SPEECHMATICS_API_KEY is required"**
-   - Make sure your `.env.local` file exists and contains the API key
-   - Check that the file is in the project root directory
+   - Make sure `.env.local` exists in the backend directory
+   - Verify the API key is correct
 
-2. **Speaker names not being detected**
-   - Ensure speakers mention their names in the conversation
-   - The AI will return "unknown" if names aren't found, and those speakers are skipped
+2. **WebSocket connection fails**
+   - Ensure the API server is running: `python start_server.py`
+   - Check firewall settings
+   - Verify port 8000 is not in use: `lsof -i :8000`
 
-3. **Handoff not working**
-   - Make sure you say "stop sampling" (not "done sampling")
-   - Check the console logs for handoff status messages
+3. **Agent not connecting to room**
+   - Verify LiveKit server is running
+   - Check LiveKit credentials in `.env.local`
 
-4. **Transcripts not saving**
-   - The transcript file is only created when you say "stop recording"
-   - Check that you have write permissions in the project directory
+4. **Import errors (speechmatics, transformers, etc.)**
+   - Reinstall dependencies: `pip install -r requirements.txt`
+   - Check Python version: `python --version` (needs 3.12+)
+   - For numpy/sklearn issues: `pip install "numpy<2.0" "protobuf<6.0"`
 
-## File Structure
+### Frontend Issues
 
+1. **WebSocket not connecting**
+   - Verify backend API server is running: `python backend/start_server.py`
+   - Check `VITE_API_URL` in `.env` (should be `ws://localhost:8000`)
+   - Open browser console to see connection errors
+
+2. **White/blank page**
+   - Check browser console for JavaScript errors (F12)
+   - Verify Vite is running: `npm run dev`
+   - Try hard refresh: Cmd+Shift+R (Mac) or Ctrl+Shift+R (Windows)
+
+3. **LiveKit connection fails**
+   - Verify LiveKit server is accessible
+   - Check token validity
+   - Ensure room name matches
+   - Check `VITE_LIVEKIT_URL` in `.env`
+
+4. **Page loads but no styling**
+   - Tailwind CSS might not be processing
+   - Check if `postcss.config.js` exists
+   - Restart Vite dev server
+
+## Development
+
+### Backend Development
+
+```bash
+cd backend
+python main.py dev  # Start agent in development mode
+python start_server.py  # Start API server
 ```
-dialogue-generation/
-├── main.py                 # Main application code
-├── requirements.txt        # Python dependencies
-├── pyproject.toml          # Project configuration
-├── .env.local              # Environment variables (create this)
-├── transcript.txt          # Output transcript file (generated)
-└── README.md              # This file
+
+### Frontend Development
+
+```bash
+cd frontend
+npm run dev  # Start Vite dev server
+npm run build  # Build for production
 ```
-
-## Dependencies
-
-- `livekit-agents`: LiveKit agent framework
-- `livekit-plugins-speechmatics`: Speechmatics STT integration
-- `livekit-plugins-noise-cancellation`: Noise cancellation
-- `langchain-openai`: OpenAI integration for speaker name extraction
-- `python-dotenv`: Environment variable management
-
-## Notes
-
-- The system requires an active LiveKit room connection
-- Real-time transcription works best with clear audio
-- Speaker identification works best when speakers introduce themselves
-- The system is designed for English language (can be configured for others)
 
 ## License
 
 [Add your license here]
 
+## Testing WebSocket Connection
+
+To verify the WebSocket is working:
+
+```bash
+# Test from command line
+cd backend
+python test_websocket.py
+
+# Or test in browser
+# Open test_websocket.html in your browser
+```
+
 ## Support
 
-For issues or questions, please check the logs for detailed error messages. The system provides extensive logging to help diagnose problems.
+For issues or questions:
+1. Check the logs for detailed error messages
+2. See `WEBSOCKET_TROUBLESHOOTING.md` for WebSocket-specific issues
+3. Verify all services are running (API server, LiveKit agent, frontend)
+4. Check browser console (F12) for frontend errors
+5. Verify environment variables are set correctly
 
