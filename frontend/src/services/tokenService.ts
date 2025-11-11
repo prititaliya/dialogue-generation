@@ -8,15 +8,21 @@ export interface TokenResponse {
 }
 
 export async function getLiveKitToken(roomName: string, identity?: string): Promise<TokenResponse> {
+  const requestBody: { room_name: string; identity?: string } = {
+    room_name: roomName,
+  }
+  
+  // Only include identity if it's provided
+  if (identity) {
+    requestBody.identity = identity
+  }
+  
   const response = await fetch(`${API_URL}/token`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      room_name: roomName,
-      identity: identity,
-    }),
+    body: JSON.stringify(requestBody),
   })
 
   if (!response.ok) {

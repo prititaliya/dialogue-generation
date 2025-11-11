@@ -6,12 +6,13 @@ export interface Transcript {
 }
 
 export interface TranscriptMessage {
-  type: 'transcript' | 'initial_transcripts' | 'ack';
+  type: 'transcript' | 'initial_transcripts' | 'ack' | 'complete_transcript';
   speaker?: string;
   text?: string;
   is_final?: boolean;
   transcripts?: Transcript[];
   message?: string;
+  meeting_title?: string;
 }
 
 export interface RoomConnectionState {

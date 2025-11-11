@@ -1,0 +1,26 @@
+{
+  "meeting_name": "m1",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "It's not a way to become a responsible adult.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "For school. Uh.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "You know, becoming a man, changing your life completely.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Yeah. So I'm curious. In your country, is there something that signifies now you are an adult? This kind of.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 4
+}

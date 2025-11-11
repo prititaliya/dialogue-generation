@@ -1,0 +1,21 @@
+{
+  "meeting_name": "m2",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "A cool idea that you're celebrating this big change. Going from childhood to adulthood. And it is a gray area, at least in the US. It's a really gray area, so it's nice to celebrate that.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "As parents that your kids are adults, hopefully. And that.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "As a child, oh, great.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 3
+}

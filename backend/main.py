@@ -36,7 +36,11 @@ logger = logging.getLogger("diarizer")
 # These timeouts happen when turn detection takes too long, but don't affect transcription
 logging.getLogger("livekit.agents.voice.audio_recognition").setLevel(logging.ERROR)
 logging.getLogger("livekit.plugins.turn_detector").setLevel(logging.ERROR)
-logging.getLogger("livekit.agents").setLevel(logging.WARNING)  # Reduce INFO level noise
+logging.getLogger("livekit.agents").setLevel(logging.ERROR)  # Suppress WARNING level noise including transcription publishing errors
+
+# Suppress transcription publishing warnings when room is closed (expected during cleanup)
+logging.getLogger("livekit.agents.voice.room_io._output").setLevel(logging.ERROR)
+logging.getLogger("livekit.rtc.participant").setLevel(logging.ERROR)  # Suppress PublishTranscriptionError warnings
 
 # ------------------------------------------------------------
 # Transcript state
@@ -160,12 +164,38 @@ class DiarizationAgent(Agent):
                     text_lower = text.lower()
                     if "stop recording" in text_lower or "stop the recording" in text_lower:
                         logger.info(f"Stop command detected: '{text}' - setting stop flag")
+                        room_name = self.ctx.room.name if self.ctx.room else "Meeting"
+                        
+                        # Save to old transcript.txt format for backward compatibility
                         with open("transcript.txt", "w") as f:
                             for sp, t in transcripts:
                                 f.write(f"{sp}: {t}\n")
                             f.write("\n")
                             f.write("Stop command detected: "+text)
                             f.write("\n")
+                        
+                        # Update the API server's transcript manager via HTTP (this will also save to JSON file)
+                        try:
+                            import aiohttp
+                            async with aiohttp.ClientSession() as session:
+                                api_url = os.getenv("API_SERVER_URL", "http://localhost:8000")
+                                async with session.post(
+                                    f"{api_url}/transcripts/update",
+                                    json={"transcripts": transcripts, "room_name": room_name}
+                                ) as resp:
+                                    if resp.status == 200:
+                                        result = await resp.json()
+                                        logger.info(f"✅ Updated API server with {len(transcripts)} transcripts and saved to {room_name}.json")
+                                    else:
+                                        logger.warning(f"⚠️  Failed to update API server: {resp.status}")
+                        except Exception as e:
+                            logger.error(f"❌ Error updating API server: {e}")
+                        
+                        # Then send via WebSocket (this will use API server's transcript manager)
+                        asyncio.create_task(
+                            transcript_manager.send_complete_transcript(room_name, transcripts)
+                        )
+                        
                         stop_flag.set()
                         print(f"\n🛑 STOP COMMAND DETECTED! Stopping recording...\n")
                     # Check if this is a final transcript
@@ -200,18 +230,40 @@ class DiarizationAgent(Agent):
                             lines = [f"{sp}: {t}" for sp, t in transcripts]
                             print("\n📝 Full Transcript so far:\n" + "\n".join(lines) + "\n")
                             
-                            # Broadcast to WebSocket clients
+                            # Update transcript manager's internal list (but don't broadcast)
+                            # This allows the API server to retrieve transcripts when requested
                             asyncio.create_task(
-                                transcript_manager.broadcast_transcript(label, text_stripped, is_final=True)
+                                transcript_manager.update_transcripts(label, text_stripped)
                             )
+                            
+                            # Also sync to API server in real-time so it has the latest transcripts
+                            # This ensures the API server has transcripts when button is clicked
+                            try:
+                                import aiohttp
+                                async def sync_to_api_server():
+                                    try:
+                                        async with aiohttp.ClientSession() as session:
+                                            api_url = os.getenv("API_SERVER_URL", "http://localhost:8000")
+                                            async with session.post(
+                                                f"{api_url}/transcripts/update",
+                                                json={"transcripts": transcripts, "room_name": self.ctx.room.name if self.ctx.room else "Meeting"}
+                                            ) as resp:
+                                                if resp.status != 200:
+                                                    logger.debug(f"Failed to sync transcript to API server: {resp.status}")
+                                    except Exception as e:
+                                        # Don't log errors for every transcript sync to avoid spam
+                                        pass
+                                asyncio.create_task(sync_to_api_server())
+                            except Exception:
+                                pass
+                            
+                            # Don't broadcast in real-time - accumulate transcripts instead
+                            # Transcripts will be sent when "stop recording" is detected or button is pressed
                             
                         else:
                             # Interim transcript - just display, never store
                             print(f"[Interim] {label}: {text}")
-                            # Broadcast interim transcript too
-                            asyncio.create_task(
-                                transcript_manager.broadcast_transcript(label, text_stripped, is_final=False)
-                            )
+                            # Don't broadcast interim transcripts either
 
                 yield ev
 

@@ -1,0 +1,21 @@
+{
+  "meeting_name": "m",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "In between the machine and dishwasher and the person who's a dishwasher.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "The same word.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "So you were like the machine. You were washing dishes.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 3
+}

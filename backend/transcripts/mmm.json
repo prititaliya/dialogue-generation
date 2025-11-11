@@ -1,0 +1,51 @@
+{
+  "meeting_name": "mmm",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "But maybe it's something we can do with our future kids.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "All right, let's go on to the next topic. The next topic is jobs. I want to know what was your worst job ever.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Worst job ever. Yeah.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Well, I have two competing jobs.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 3",
+      "text": "Hopefully it's not your current job. Making English lessons.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Video editing and doing these videos. Oh, no.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "I can't stand working with my wife.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Just kidding. It's the best.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Yeah.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 9
+}
