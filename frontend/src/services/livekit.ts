@@ -1,4 +1,4 @@
-import { Room, RoomEvent, RemoteParticipant, Track, LocalAudioTrack, createLocalAudioTrack } from 'livekit-client';
+import { Room, RoomEvent, LocalAudioTrack, createLocalAudioTrack } from 'livekit-client';
 import type { RoomConnectionState } from '../types';
 
 export class LiveKitService {
