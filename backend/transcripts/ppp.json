@@ -1,0 +1,31 @@
+{
+  "meeting_name": "ppp",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "An office all day, right? Yeah, it was my first.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "We talked about. So sitting in that office desk.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "It was just not my day. But the office, on the other hand, did really try to make it interesting for the employees because they knew.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Most of the people I worked with were in a similar position.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "It wasn't their lifelong dream to work in that job. So about once a week we had these.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 5
+}

@@ -70,8 +70,66 @@ function App() {
         setWsConnected(true)
       })
 
+      const handleRealtimeTranscript = (transcript: Transcript, meetingName?: string) => {
+        console.log('Real-time transcript received:', transcript, 'for meeting:', meetingName);
+        
+        // Update if:
+        // 1. Recording is active (always show live updates during recording)
+        // 2. No meeting is selected (showing live view)
+        // 3. The meeting name matches the selected meeting
+        const shouldUpdate = isRecording || 
+                             !selectedMeeting || 
+                             (meetingName && selectedMeeting === meetingName) ||
+                             (meetingTitle && meetingName && meetingTitle === meetingName);
+        
+        if (shouldUpdate) {
+          setTranscripts((prevTranscripts) => {
+            // Check if this is an update to the last transcript from the same speaker
+            const lastIndex = prevTranscripts.length - 1;
+            const lastTranscript = prevTranscripts[lastIndex];
+            
+            // If same speaker and not final, update the last entry
+            if (lastTranscript && 
+                lastTranscript.speaker === transcript.speaker && 
+                !lastTranscript.is_final && 
+                !transcript.is_final) {
+              // Update existing interim entry
+              const updated = [...prevTranscripts];
+              updated[lastIndex] = transcript;
+              return updated;
+            } 
+            // If same speaker and converting from interim to final, update the last entry
+            else if (lastTranscript && 
+                     lastTranscript.speaker === transcript.speaker && 
+                     !lastTranscript.is_final && 
+                     transcript.is_final) {
+              // Convert interim to final
+              const updated = [...prevTranscripts];
+              updated[lastIndex] = transcript;
+              return updated;
+            }
+            // If same speaker and both final, check if text is an extension
+            else if (lastTranscript && 
+                     lastTranscript.speaker === transcript.speaker && 
+                     lastTranscript.is_final && 
+                     transcript.is_final &&
+                     lastTranscript.text && 
+                     transcript.text.includes(lastTranscript.text)) {
+              // Text is an extension, update it
+              const updated = [...prevTranscripts];
+              updated[lastIndex] = transcript;
+              return updated;
+            }
+            // Otherwise, append new entry
+            else {
+              return [...prevTranscripts, transcript];
+            }
+          });
+        }
+      };
+
       transcriptService.connect(
-        () => {}, // No real-time transcript handler - we only want complete transcripts
+        handleRealtimeTranscript, // Real-time transcript handler
         undefined, // No initial transcripts handler
         handleCompleteTranscript // Handle complete transcript when recording stops
       )
@@ -118,6 +176,11 @@ function App() {
 
   // Load a specific transcript
   const loadTranscript = async (meetingName: string) => {
+    // Unwatch previous meeting if any
+    if (selectedMeeting && selectedMeeting !== meetingName && transcriptService) {
+      transcriptService.unwatchTranscript(selectedMeeting)
+    }
+    
     setLoadingTranscripts(true)
     try {
       const response = await fetch(`${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(meetingName)}`)
@@ -127,6 +190,11 @@ function App() {
         setTranscripts(data.transcripts || [])
         setSelectedMeeting(meetingName)
         console.log('Loaded transcript for:', meetingName, data.transcripts?.length)
+        
+        // Start watching this transcript file for real-time updates
+        if (transcriptService) {
+          transcriptService.watchTranscript(meetingName)
+        }
       } else {
         const errorData = await response.json()
         setError(`Failed to load transcript: ${errorData.detail || 'Unknown error'}`)
@@ -138,6 +206,17 @@ function App() {
       setLoadingTranscripts(false)
     }
   }
+  
+  // Watch transcript when recording starts
+  useEffect(() => {
+    if (isRecording && roomName && transcriptService) {
+      console.log('Recording started, watching transcript file:', roomName)
+      transcriptService.watchTranscript(roomName)
+    } else if (!isRecording && roomName && transcriptService) {
+      // Optionally unwatch when recording stops (or keep watching to see final updates)
+      // transcriptService.unwatchTranscript(roomName)
+    }
+  }, [isRecording, roomName, transcriptService])
 
   // Load all available transcripts on component mount
   useEffect(() => {

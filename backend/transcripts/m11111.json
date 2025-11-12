@@ -1,0 +1,26 @@
+{
+  "meeting_name": "m11111",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "The market.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "For unique admin API key for authentication. This key is required in the header of all admin API requests to authenticate your account and access Anthropic's model.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Hi, my name is Preet.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "It's a sunny out there in Manitoba. Winnipeg.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 4
+}

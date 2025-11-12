@@ -1,0 +1,31 @@
+{
+  "meeting_name": "p11111",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "Following the.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "2010, where people already have like phones on their cameras and stuff. I mean, that's at least getting more popular.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Yeah, they didn't need your picture. No.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "So I had to take everybody's picture. And then when they got off the boat, I stood at the side and said, hey, come over here. By this picture. And they were like $20 for one picture.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Crazy.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 5
+}

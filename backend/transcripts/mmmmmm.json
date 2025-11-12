@@ -1,0 +1,31 @@
+{
+  "meeting_name": "mmmmmm",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "And I actually got fired from that job.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Because they stole a picture.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Because they stole a picture, and I couldn't I didn't catch them on time. And I was like, good riddance.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Yeah, goodbye to this job. Goodbye forever.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "The only reason this was better than the other job than dishwashing, is because I worked with some people.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 5
+}

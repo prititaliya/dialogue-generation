@@ -1,0 +1,81 @@
+{
+  "meeting_name": "meeet1",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "In general. Okay.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Portland. Seattle and Pacific. I think.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "I would like to go to Seattle.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Because it's a big city. And the city sounds cool. Um, not.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Many cities in the US are that interesting to me because I've traveled in other places in Europe and in Asia, and those cities are so much more vibrant except for New York City, which is an awesome city.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 3",
+      "text": "Yeah, I'm sure a lot of students.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Are us.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 3",
+      "text": "Want to visit the US, and they want to see these places.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "I'm also from America. So, you know, it's like.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 3",
+      "text": "It's always less interesting.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Yeah, it's less interesting to me. But Seattle seems like a really cool town and it's higher on my list than, say.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 4",
+      "text": "And, uh, for me, uh, I want to travel to.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 4",
+      "text": "Some European cities, such as.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 4",
+      "text": "Paris. Rome. Milan.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 4",
+      "text": "Yeah. Those kind of cities. I might want to travel.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 15
+}

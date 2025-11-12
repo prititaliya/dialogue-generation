@@ -1,0 +1,26 @@
+{
+  "meeting_name": "mmmmmm1",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "And we got along pretty well.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "You were by the river.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "It was okay. Except you did have to drive an hour to get there. That's crazy.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Truly are for squid.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 4
+}

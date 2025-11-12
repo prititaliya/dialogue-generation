@@ -1,0 +1,61 @@
+{
+  "meeting_name": "prit",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "It was like a big, sprawling, stinky place.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "It seems like a.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "No offense, L.A..",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Is a lot more intimidating. At least.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Like, that's a nice way to.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Put it. There's a lot going on there, but Seattle feels more comfortable.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Yeah, it seems pretty hip.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "To northwest.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Yeah. So the northwest also because.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "There's big mountains there. And then there's really lush and green forests. And I love taking hikes. And if you go at the right time of the year because I've heard it's very rainy in the Pacific Northwest. I'd like to go and take a nice hike up to a big mountain, and maybe hop.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 3",
+      "text": "Over.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 11
+}

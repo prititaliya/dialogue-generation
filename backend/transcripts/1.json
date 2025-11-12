@@ -1,0 +1,41 @@
+{
+  "meeting_name": "1",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "It's been a really long time since I've been that, and I'd like to go and maybe travel to where I was when I was a kid. It's gotten so much bigger than it was when I was a kid. So I'm sure there's so many more people there. But also there's really great nature. There's a lot of really big mountains in Colorado. There's the garden of the gods, which has really interesting rock formations. As you can tell, we're very nature.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Driven. We want to go see natural places.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Yeah, well, a lot of my places have to do with nature too.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "But yes, let's.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Hear it. I almost said the Grand Canyon.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "But you knew I was.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Going to say. I kind of figured you'd say it, and I think it would be really cool to camp in the Grand Canyon or go.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 7
+}

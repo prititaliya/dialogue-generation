@@ -5,7 +5,7 @@ export class TranscriptService {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 3000;
-  private listeners: Set<(transcript: Transcript) => void> = new Set();
+  private listeners: Set<(transcript: Transcript, meetingName?: string) => void> = new Set();
   private onInitialTranscripts: ((transcripts: Transcript[]) => void) | null = null;
   private onCompleteTranscript: ((meetingTitle: string, transcripts: Transcript[]) => void) | null = null;
   private connectionCallbacks: Set<() => void> = new Set();
@@ -17,7 +17,7 @@ export class TranscriptService {
   }
 
   connect(
-    onTranscript: (transcript: Transcript) => void, 
+    onTranscript: (transcript: Transcript, meetingName?: string) => void, 
     onInitial?: (transcripts: Transcript[]) => void,
     onComplete?: (meetingTitle: string, transcripts: Transcript[]) => void
   ) {
@@ -77,7 +77,8 @@ export class TranscriptService {
               
               this.listeners.forEach((listener) => {
                 try {
-                  listener(transcript);
+                  // Always pass both transcript and meeting_name (meeting_name may be undefined)
+                  listener(transcript, message.meeting_name);
                 } catch (err) {
                   console.error('Error in transcript listener:', err);
                 }
@@ -105,6 +106,34 @@ export class TranscriptService {
                 hasCallback: !!this.onCompleteTranscript,
                 hasTranscripts: !!message.transcripts,
                 hasTitle: !!message.meeting_title
+              });
+            }
+          } else if (message.type === 'transcript_new' || message.type === 'transcript_update') {
+            // Handle real-time file updates
+            console.log('Received file-based transcript update:', {
+              type: message.type,
+              meeting_name: message.meeting_name,
+              transcript_count: message.transcripts?.length || 0,
+              is_update: message.is_update
+            });
+            
+            if (message.transcripts && message.transcripts.length > 0) {
+              // Convert to Transcript format and notify listeners
+              message.transcripts.forEach((transcriptData: any) => {
+                const transcript = {
+                  speaker: transcriptData.speaker,
+                  text: transcriptData.text,
+                  is_final: transcriptData.is_final ?? true,
+                  timestamp: Date.now(),
+                } as Transcript;
+                
+                this.listeners.forEach((listener) => {
+                  try {
+                    listener(transcript, message.meeting_name);
+                  } catch (err) {
+                    console.error('Error in transcript listener:', err);
+                  }
+                });
               });
             }
           }
@@ -175,6 +204,63 @@ export class TranscriptService {
             console.error('Failed to reconnect WebSocket. Please refresh the page.');
           }
         }, 1000);
+      }
+    }
+  }
+
+  watchTranscript(meetingName: string) {
+    console.log('Requesting to watch transcript file:', meetingName);
+    
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        const message = {
+          type: 'watch_transcript',
+          meeting_name: meetingName,
+          room_name: meetingName // Support both field names
+        };
+        console.log('Sending watch_transcript message:', message);
+        this.ws.send(JSON.stringify(message));
+      } catch (error) {
+        console.error('Error requesting to watch transcript:', error);
+      }
+    } else {
+      console.warn('WebSocket is not connected. Current state:', this.ws?.readyState);
+      // Try to reconnect if not connected
+      if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+        console.log('Attempting to reconnect WebSocket...');
+        this.connectWebSocket();
+        // Wait a bit for connection, then retry
+        setTimeout(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const message = {
+              type: 'watch_transcript',
+              meeting_name: meetingName,
+              room_name: meetingName
+            };
+            console.log('Retrying watch_transcript after reconnect:', message);
+            this.ws.send(JSON.stringify(message));
+          } else {
+            console.error('Failed to reconnect WebSocket. Please refresh the page.');
+          }
+        }, 1000);
+      }
+    }
+  }
+
+  unwatchTranscript(meetingName: string) {
+    console.log('Requesting to stop watching transcript file:', meetingName);
+    
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        const message = {
+          type: 'unwatch_transcript',
+          meeting_name: meetingName,
+          room_name: meetingName
+        };
+        console.log('Sending unwatch_transcript message:', message);
+        this.ws.send(JSON.stringify(message));
+      } catch (error) {
+        console.error('Error requesting to unwatch transcript:', error);
       }
     }
   }

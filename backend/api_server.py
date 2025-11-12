@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 load_dotenv(".env.local")
 
@@ -71,6 +73,365 @@ def load_transcript_from_file(meeting_name: str) -> Optional[Dict]:
         logger.error(f"❌ Error loading transcript from {file_path}: {e}")
         return None
 
+def update_transcript_incremental(meeting_name: str, speaker: str, text: str, is_final: bool = False, broadcast: bool = True) -> Path:
+    """
+    Incrementally update transcript JSON file for each word/speech event.
+    - For interim events: Update the last entry if same speaker, or create new entry
+    - For final events: Mark current entry as final
+    """
+    # Try to import fcntl for file locking (Unix systems only)
+    try:
+        import fcntl
+        HAS_FCNTL = True
+    except ImportError:
+        HAS_FCNTL = False  # Windows doesn't have fcntl
+    
+    file_path = get_transcript_file_path(meeting_name)
+    
+    try:
+        # Load existing data or create new structure
+        if file_path.exists():
+            with open(file_path, 'r', encoding='utf-8') as f:
+                # Use file locking to prevent race conditions (Unix only)
+                if HAS_FCNTL:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                        data = json.load(f)
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                else:
+                    data = json.load(f)
+        else:
+            data = {
+                "meeting_name": meeting_name,
+                "transcripts": [],
+                "total_entries": 0
+            }
+        
+        transcripts = data.get("transcripts", [])
+        
+        if is_final:
+            # Final event: Mark the last entry as final if it matches this speaker
+            text_stripped = text.strip()
+            if not text_stripped:
+                # Skip empty text
+                return file_path
+                
+            if transcripts:
+                last_entry = transcripts[-1]
+                last_text = last_entry.get("text", "").strip()
+                
+                if last_entry.get("speaker") == speaker and not last_entry.get("is_final", False):
+                    # Update existing interim entry to final
+                    # Only update if text is different or an extension
+                    if last_text != text_stripped:
+                        transcripts[-1] = {
+                            "speaker": speaker,
+                            "text": text_stripped,
+                            "is_final": True
+                        }
+                    # If text is exactly the same, just mark as final (no update needed)
+                elif last_entry.get("speaker") == speaker and last_entry.get("is_final", False):
+                    # Same speaker, final entry - check if text is an extension or duplicate
+                    if last_text == text_stripped:
+                        # Exact duplicate - skip adding
+                        logger.debug(f"⏭️  Skipping duplicate final transcript: {speaker} - {text_stripped[:30]}...")
+                        return file_path
+                    elif last_text in text_stripped and len(text_stripped) > len(last_text):
+                        # Text is an extension, update it
+                        transcripts[-1] = {
+                            "speaker": speaker,
+                            "text": text_stripped,
+                            "is_final": True
+                        }
+                    else:
+                        # Check if this exact text already exists in recent entries (prevent repeats)
+                        # Check last 3 entries to catch duplicates
+                        is_duplicate = False
+                        for entry in transcripts[-3:]:
+                            if (entry.get("speaker") == speaker and 
+                                entry.get("text", "").strip() == text_stripped and 
+                                entry.get("is_final", False)):
+                                is_duplicate = True
+                                logger.debug(f"⏭️  Skipping duplicate final transcript (found in recent entries): {speaker} - {text_stripped[:30]}...")
+                                break
+                        
+                        if not is_duplicate:
+                            # New final entry from same speaker
+                            transcripts.append({
+                                "speaker": speaker,
+                                "text": text_stripped,
+                                "is_final": True
+                            })
+                        else:
+                            # Skip duplicate
+                            return file_path
+                else:
+                    # Different speaker - check if this exact text already exists in recent entries
+                    is_duplicate = False
+                    for entry in transcripts[-3:]:
+                        if (entry.get("speaker") == speaker and 
+                            entry.get("text", "").strip() == text_stripped and 
+                            entry.get("is_final", False)):
+                            is_duplicate = True
+                            logger.debug(f"⏭️  Skipping duplicate final transcript (different speaker, found in recent entries): {speaker} - {text_stripped[:30]}...")
+                            break
+                    
+                    if not is_duplicate:
+                        # Different speaker or no matching entry, create new final entry
+                        transcripts.append({
+                            "speaker": speaker,
+                            "text": text_stripped,
+                            "is_final": True
+                        })
+                    else:
+                        # Skip duplicate
+                        return file_path
+            else:
+                # No existing transcripts, create first final entry
+                transcripts.append({
+                    "speaker": speaker,
+                    "text": text_stripped,
+                    "is_final": True
+                })
+        else:
+            # Interim event: Update last entry if same speaker, or create new interim entry
+            if transcripts:
+                last_entry = transcripts[-1]
+                if last_entry.get("speaker") == speaker and not last_entry.get("is_final", False):
+                    # Update existing interim entry
+                    transcripts[-1] = {
+                        "speaker": speaker,
+                        "text": text.strip(),
+                        "is_final": False
+                    }
+                elif last_entry.get("speaker") == speaker and last_entry.get("is_final", False):
+                    # Same speaker but last entry was final, create new interim entry
+                    transcripts.append({
+                        "speaker": speaker,
+                        "text": text.strip(),
+                        "is_final": False
+                    })
+                else:
+                    # Different speaker, create new interim entry
+                    transcripts.append({
+                        "speaker": speaker,
+                        "text": text.strip(),
+                        "is_final": False
+                    })
+            else:
+                # No existing transcripts, create first interim entry
+                transcripts.append({
+                    "speaker": speaker,
+                    "text": text.strip(),
+                    "is_final": False
+                })
+        
+        # Update data structure
+        data["transcripts"] = transcripts
+        data["total_entries"] = len([t for t in transcripts if t.get("is_final", False)])
+        
+        # Save back to file with locking (if available)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            if HAS_FCNTL:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            else:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        
+        logger.debug(f"💾 Incrementally updated transcript: {speaker} - {text[:30]}... (final={is_final})")
+        
+        # Broadcast the update to all connected WebSocket clients
+        if broadcast:
+            try:
+                # Try to get the current event loop
+                try:
+                    loop = asyncio.get_running_loop()
+                    # If we're in an async context, schedule the broadcast as a task
+                    asyncio.create_task(
+                        transcript_manager.broadcast_transcript(speaker, text.strip(), is_final, meeting_name)
+                    )
+                except RuntimeError:
+                    # No running event loop - this shouldn't happen in async context
+                    # But if it does, we'll try to create a new event loop
+                    # Note: This is a fallback and may not work in all cases
+                    logger.warning(f"⚠️  No running event loop for broadcast, skipping WebSocket update")
+            except Exception as e:
+                logger.warning(f"⚠️  Error broadcasting transcript update: {e}")
+        
+        return file_path
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to incrementally update transcript to {file_path}: {e}")
+        raise
+
+# File watcher for transcript files
+class TranscriptFileWatcher(FileSystemEventHandler):
+    """Watch for changes to transcript JSON files and notify watching clients"""
+    
+    def __init__(self, transcript_manager: 'TranscriptManager'):
+        self.transcript_manager = transcript_manager
+        self.last_known_state: Dict[str, Dict] = {}  # meeting_name -> last known transcript data
+        self.watched_files: Dict[str, Set[WebSocket]] = {}  # meeting_name -> set of watching WebSockets
+        self.event_loop: Optional[asyncio.AbstractEventLoop] = None
+        
+    def add_watcher(self, meeting_name: str, websocket: WebSocket):
+        """Add a WebSocket to watch a specific meeting's transcript file"""
+        if meeting_name not in self.watched_files:
+            self.watched_files[meeting_name] = set()
+        self.watched_files[meeting_name].add(websocket)
+        logger.info(f"👁️  Added watcher for '{meeting_name}' (total watchers: {len(self.watched_files[meeting_name])})")
+        
+        # Load initial state
+        file_path = get_transcript_file_path(meeting_name)
+        if file_path.exists():
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.last_known_state[meeting_name] = data
+            except Exception as e:
+                logger.error(f"Error loading initial state for {meeting_name}: {e}")
+    
+    def remove_watcher(self, meeting_name: str, websocket: WebSocket):
+        """Remove a WebSocket from watching a meeting's transcript file"""
+        if meeting_name in self.watched_files:
+            self.watched_files[meeting_name].discard(websocket)
+            if len(self.watched_files[meeting_name]) == 0:
+                del self.watched_files[meeting_name]
+                if meeting_name in self.last_known_state:
+                    del self.last_known_state[meeting_name]
+            logger.info(f"👁️  Removed watcher for '{meeting_name}'")
+    
+    def remove_all_watchers_for_websocket(self, websocket: WebSocket):
+        """Remove a WebSocket from all watched files"""
+        meetings_to_remove = []
+        for meeting_name, watchers in list(self.watched_files.items()):
+            if websocket in watchers:
+                watchers.discard(websocket)
+                if len(watchers) == 0:
+                    meetings_to_remove.append(meeting_name)
+        
+        for meeting_name in meetings_to_remove:
+            del self.watched_files[meeting_name]
+            if meeting_name in self.last_known_state:
+                del self.last_known_state[meeting_name]
+    
+    def on_modified(self, event):
+        """Called when a file is modified"""
+        if event.is_directory:
+            return
+        
+        file_path = Path(event.src_path)
+        if file_path.suffix != '.json':
+            return
+        
+        # Extract meeting name from filename
+        meeting_name = file_path.stem
+        
+        # Only process if someone is watching this file
+        if meeting_name not in self.watched_files:
+            return
+        
+        # Small delay to ensure file write is complete
+        import time
+        time.sleep(0.1)
+        
+        try:
+            # Read the updated file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                new_data = json.load(f)
+            
+            # Get last known state
+            last_state = self.last_known_state.get(meeting_name, {"transcripts": [], "total_entries": 0})
+            last_transcripts = last_state.get("transcripts", [])
+            new_transcripts = new_data.get("transcripts", [])
+            
+            # Find new entries (entries that weren't in the last state)
+            last_count = len(last_transcripts)
+            new_count = len(new_transcripts)
+            
+            if new_count > last_count:
+                # New entries added - send them to watching clients
+                new_entries = new_transcripts[last_count:]
+                logger.info(f"📝 Detected {len(new_entries)} new transcript entries in '{meeting_name}'")
+                
+                # Update last known state
+                self.last_known_state[meeting_name] = new_data
+                
+                # Send new entries to all watching WebSockets
+                self._send_updates_to_watchers(meeting_name, new_entries)
+            elif new_count == last_count and new_transcripts != last_transcripts:
+                # Same count but content changed (likely an update to last entry)
+                # Check if the last entry was updated
+                if new_transcripts and last_transcripts:
+                    last_new = new_transcripts[-1]
+                    last_old = last_transcripts[-1]
+                    if last_new != last_old:
+                        # Last entry was updated
+                        logger.info(f"📝 Detected update to last transcript entry in '{meeting_name}'")
+                        self.last_known_state[meeting_name] = new_data
+                        self._send_updates_to_watchers(meeting_name, [last_new], is_update=True)
+        
+        except Exception as e:
+            logger.error(f"Error processing file change for {meeting_name}: {e}")
+    
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
+        """Set the event loop to use for sending updates from file watcher thread"""
+        self.event_loop = loop
+    
+    def _send_updates_to_watchers(self, meeting_name: str, new_entries: List[Dict], is_update: bool = False):
+        """Send new/updated transcript entries to all watching WebSockets"""
+        if meeting_name not in self.watched_files:
+            return
+        
+        watchers = list(self.watched_files[meeting_name])
+        if not watchers:
+            return
+        
+        message = {
+            "type": "transcript_update" if is_update else "transcript_new",
+            "meeting_name": meeting_name,
+            "transcripts": new_entries,
+            "is_update": is_update
+        }
+        
+        # Schedule the async send operation on the event loop
+        # This is called from a file watcher thread, so we need to use run_coroutine_threadsafe
+        if self.event_loop is None:
+            # Try to get the event loop
+            try:
+                self.event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                try:
+                    self.event_loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    logger.error("No event loop available for sending file updates")
+                    return
+        
+        # Use run_coroutine_threadsafe to schedule from another thread
+        asyncio.run_coroutine_threadsafe(
+            self._async_send_updates(watchers, message, meeting_name),
+            self.event_loop
+        )
+    
+    async def _async_send_updates(self, watchers: List[WebSocket], message: Dict, meeting_name: str):
+        """Async helper to send updates to watchers"""
+        disconnected = set()
+        for websocket in watchers:
+            try:
+                await websocket.send_json(message)
+            except Exception as e:
+                logger.error(f"Error sending file update to client: {e}")
+                disconnected.add(websocket)
+        
+        # Remove disconnected clients
+        for ws in disconnected:
+            self.remove_watcher(meeting_name, ws)
+            self.transcript_manager.disconnect(ws)
+
 # Global transcript manager
 class TranscriptManager:
     def __init__(self):
@@ -78,6 +439,8 @@ class TranscriptManager:
         self.transcripts: List[Tuple[str, str, bool]] = []  # (speaker, text, is_final)
         self.speaker_label_map: Dict[str, str] = {}
         self.lock = asyncio.Lock()
+        self.file_watcher = TranscriptFileWatcher(self)
+        self.observer: Optional[Observer] = None
     
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -96,36 +459,105 @@ class TranscriptManager:
     
     def disconnect(self, websocket: WebSocket):
         self.connections.discard(websocket)
+        # Remove from all file watchers
+        self.file_watcher.remove_all_watchers_for_websocket(websocket)
         logger.info(f"Client disconnected. Total connections: {len(self.connections)}")
     
-    async def broadcast_transcript(self, speaker: str, text: str, is_final: bool = True):
+    def start_file_observer(self):
+        """Start the file system observer to watch transcript files"""
+        if self.observer is None:
+            self.observer = Observer()
+            self.observer.schedule(self.file_watcher, str(TRANSCRIPTS_DIR), recursive=False)
+            self.observer.start()
+            logger.info(f"👁️  Started file observer for transcript directory: {TRANSCRIPTS_DIR}")
+    
+    def stop_file_observer(self):
+        """Stop the file system observer"""
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+            self.observer = None
+            logger.info("👁️  Stopped file observer")
+    
+    async def broadcast_transcript(self, speaker: str, text: str, is_final: bool = True, meeting_name: Optional[str] = None):
         """Broadcast a transcript to all connected clients"""
         async with self.lock:
+            text_stripped = text.strip()
+            if not text_stripped:
+                # Skip empty text
+                return
+                
             # Store transcript
+            is_duplicate = False
             if is_final:
                 # Check if this is an update to the last transcript from the same speaker
                 updated_existing = False
+                
                 if self.transcripts:
-                    last_speaker, last_text, _ = self.transcripts[-1]
-                    if speaker == last_speaker and last_text in text:
-                        self.transcripts[-1] = (speaker, text, is_final)
+                    last_speaker, last_text, last_is_final = self.transcripts[-1]
+                    if speaker == last_speaker:
+                        if not last_is_final:
+                            # Converting interim to final - update existing entry
+                            self.transcripts[-1] = (speaker, text_stripped, is_final)
+                            updated_existing = True
+                        elif last_text == text_stripped:
+                            # Exact duplicate - skip adding
+                            logger.debug(f"⏭️  Skipping duplicate broadcast transcript: {speaker} - {text_stripped[:30]}...")
+                            is_duplicate = True
+                        elif last_text in text_stripped and len(text_stripped) > len(last_text):
+                            # Both final, text is extension - update existing entry
+                            self.transcripts[-1] = (speaker, text_stripped, is_final)
+                            updated_existing = True
+                        else:
+                            # Check if this exact text already exists in recent entries (prevent repeats)
+                            for entry in self.transcripts[-3:]:
+                                entry_speaker, entry_text, entry_is_final = entry
+                                if (entry_speaker == speaker and 
+                                    entry_text == text_stripped and 
+                                    entry_is_final):
+                                    is_duplicate = True
+                                    logger.debug(f"⏭️  Skipping duplicate broadcast transcript (found in recent entries): {speaker} - {text_stripped[:30]}...")
+                                    break
+                    else:
+                        # Different speaker - check if this exact text already exists in recent entries
+                        for entry in self.transcripts[-3:]:
+                            entry_speaker, entry_text, entry_is_final = entry
+                            if (entry_speaker == speaker and 
+                                entry_text == text_stripped and 
+                                entry_is_final):
+                                is_duplicate = True
+                                logger.debug(f"⏭️  Skipping duplicate broadcast transcript (different speaker, found in recent entries): {speaker} - {text_stripped[:30]}...")
+                                break
+                
+                if not updated_existing and not is_duplicate:
+                    self.transcripts.append((speaker, text_stripped, is_final))
+            else:
+                # For interim transcripts, update last entry if same speaker, or append new
+                updated_existing = False
+                if self.transcripts:
+                    last_speaker, last_text, last_is_final = self.transcripts[-1]
+                    if speaker == last_speaker and not last_is_final:
+                        # Update existing interim entry
+                        self.transcripts[-1] = (speaker, text_stripped, is_final)
                         updated_existing = True
                 
                 if not updated_existing:
-                    self.transcripts.append((speaker, text, is_final))
-            else:
-                # For interim transcripts, we can append temporarily or just broadcast
-                pass
+                    self.transcripts.append((speaker, text_stripped, is_final))
         
-        # Broadcast to all connected clients
+        # Broadcast to all connected clients (only if not a duplicate)
+        if is_final and is_duplicate:
+            # Don't broadcast duplicates
+            return
+            
         message = {
             "type": "transcript",
             "speaker": speaker,
-            "text": text,
-            "is_final": is_final
+            "text": text_stripped,
+            "is_final": is_final,
+            "meeting_name": meeting_name
         }
         
-        logger.info(f"Broadcasting transcript: {speaker} - {text[:50]}... (final={is_final}, connections={len(self.connections)})")
+        logger.info(f"Broadcasting transcript: {speaker} - {text_stripped[:50]}... (final={is_final}, connections={len(self.connections)})")
         
         if len(self.connections) == 0:
             logger.warning("No WebSocket connections available to send transcript to!")
@@ -150,19 +582,62 @@ class TranscriptManager:
         """Get speaker label for a speaker ID"""
         return self.speaker_label_map.get(speaker_id, f"Speaker {speaker_id}")
     
-    async def update_transcripts(self, speaker: str, text: str):
+    async def update_transcripts(self, speaker: str, text: str, is_final: bool = True):
         """Update internal transcript list without broadcasting (for accumulation)"""
         async with self.lock:
+            text_stripped = text.strip()
+            if not text_stripped:
+                # Skip empty text
+                return
+                
             # Check if this is an update to the last transcript from the same speaker
             updated_existing = False
-            if self.transcripts:
-                last_speaker, last_text, _ = self.transcripts[-1]
-                if speaker == last_speaker and last_text in text:
-                    self.transcripts[-1] = (speaker, text, True)
-                    updated_existing = True
+            is_duplicate = False
             
-            if not updated_existing:
-                self.transcripts.append((speaker, text, True))
+            if self.transcripts:
+                last_speaker, last_text, last_is_final = self.transcripts[-1]
+                if speaker == last_speaker:
+                    if not is_final and not last_is_final:
+                        # Both interim - update existing entry
+                        self.transcripts[-1] = (speaker, text_stripped, is_final)
+                        updated_existing = True
+                    elif is_final and not last_is_final:
+                        # Converting interim to final - update existing entry
+                        self.transcripts[-1] = (speaker, text_stripped, is_final)
+                        updated_existing = True
+                    elif is_final and last_is_final:
+                        # Both final - check for duplicates or extensions
+                        if last_text == text_stripped:
+                            # Exact duplicate - skip adding
+                            logger.debug(f"⏭️  Skipping duplicate transcript in manager: {speaker} - {text_stripped[:30]}...")
+                            is_duplicate = True
+                        elif last_text in text_stripped and len(text_stripped) > len(last_text):
+                            # Text is extension - update existing entry
+                            self.transcripts[-1] = (speaker, text_stripped, is_final)
+                            updated_existing = True
+                        else:
+                            # Check if this exact text already exists in recent entries (prevent repeats)
+                            for entry in self.transcripts[-3:]:
+                                entry_speaker, entry_text, entry_is_final = entry
+                                if (entry_speaker == speaker and 
+                                    entry_text == text_stripped and 
+                                    entry_is_final):
+                                    is_duplicate = True
+                                    logger.debug(f"⏭️  Skipping duplicate transcript in manager (found in recent entries): {speaker} - {text_stripped[:30]}...")
+                                    break
+                else:
+                    # Different speaker - check if this exact text already exists in recent entries
+                    for entry in self.transcripts[-3:]:
+                        entry_speaker, entry_text, entry_is_final = entry
+                        if (entry_speaker == speaker and 
+                            entry_text == text_stripped and 
+                            entry_is_final):
+                            is_duplicate = True
+                            logger.debug(f"⏭️  Skipping duplicate transcript in manager (different speaker, found in recent entries): {speaker} - {text_stripped[:30]}...")
+                            break
+            
+            if not updated_existing and not is_duplicate:
+                self.transcripts.append((speaker, text_stripped, is_final))
     
     async def send_complete_transcript(self, meeting_title: str, transcript_list: List[Tuple[str, str]] = None):
         """Send complete transcript to all connected clients when recording stops"""
@@ -210,7 +685,13 @@ transcript_manager = TranscriptManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API server starting up...")
+    # Set the event loop for the file watcher
+    transcript_manager.file_watcher.set_event_loop(asyncio.get_running_loop())
+    # Start file observer for transcript files
+    transcript_manager.start_file_observer()
     yield
+    # Stop file observer on shutdown
+    transcript_manager.stop_file_observer()
     logger.info("API server shutting down...")
 
 app = FastAPI(lifespan=lifespan)
@@ -387,7 +868,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     message = json.loads(data)
                     logger.info(f"📨 Received WebSocket message from {client_host}: {message}")
-                    if message.get("type") == "request_transcript":
+                    message_type = message.get("type")
+                    
+                    if message_type == "request_transcript":
                         # Client is requesting the complete transcript
                         room_name = message.get("room_name", "Meeting")
                         logger.info(f"🎯 Client {client_host} requested transcript for room: {room_name}")
@@ -423,6 +906,38 @@ async def websocket_endpoint(websocket: WebSocket):
                                 logger.warning(f"⚠️  No transcripts available in API server or file. Transcripts may be in main.py process.")
                             await transcript_manager.send_complete_transcript(room_name)
                             logger.info(f"✅ Sent complete transcript response to {client_host}")
+                    
+                    elif message_type == "watch_transcript":
+                        # Client wants to watch a transcript file for real-time updates
+                        meeting_name = message.get("meeting_name") or message.get("room_name")
+                        if meeting_name:
+                            logger.info(f"👁️  Client {client_host} wants to watch transcript: {meeting_name}")
+                            transcript_manager.file_watcher.add_watcher(meeting_name, websocket)
+                            
+                            # Also send current transcript if file exists
+                            transcript_data = load_transcript_from_file(meeting_name)
+                            if transcript_data:
+                                message_to_send = {
+                                    "type": "complete_transcript",
+                                    "meeting_title": transcript_data.get("meeting_name", meeting_name),
+                                    "transcripts": transcript_data.get("transcripts", [])
+                                }
+                                try:
+                                    await websocket.send_json(message_to_send)
+                                    logger.info(f"✅ Sent initial transcript to watcher: {meeting_name}")
+                                except Exception as e:
+                                    logger.error(f"Error sending initial transcript: {e}")
+                        else:
+                            logger.warning(f"⚠️  watch_transcript message missing meeting_name")
+                    
+                    elif message_type == "unwatch_transcript":
+                        # Client wants to stop watching a transcript file
+                        meeting_name = message.get("meeting_name") or message.get("room_name")
+                        if meeting_name:
+                            logger.info(f"👁️  Client {client_host} wants to stop watching transcript: {meeting_name}")
+                            transcript_manager.file_watcher.remove_watcher(meeting_name, websocket)
+                        else:
+                            logger.warning(f"⚠️  unwatch_transcript message missing meeting_name")
                 except json.JSONDecodeError:
                     # Not a JSON message, ignore
                     logger.warning(f"Received non-JSON message: {data}")

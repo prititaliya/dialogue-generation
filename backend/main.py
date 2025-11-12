@@ -18,7 +18,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from livekit.plugins import speechmatics
 import asyncio
-from api_server import get_transcript_manager
+from api_server import get_transcript_manager, update_transcript_incremental
 
 # Import for handling microphone errors (agent uses room audio only)
 try:
@@ -209,31 +209,55 @@ class DiarizationAgent(Agent):
                     
                     text_stripped = text.strip()
                     if text_stripped:
+                        room_name = self.ctx.room.name if self.ctx.room else "Meeting"
+                        
                         if is_final:
-                            # Final transcript - only store truly final ones
+                            # Final transcript - mark current entry as final
                             # Check if this is an update to the last transcript from the same speaker
                             updated_existing = False
+                            is_duplicate = False
+                            
                             if transcripts:
                                 last_speaker, last_text = transcripts[-1]
+                                
+                                # Check for exact duplicate with last entry
+                                if label == last_speaker and last_text == text_stripped:
+                                    # Exact duplicate - skip adding
+                                    logger.debug(f"⏭️  Skipping duplicate final transcript: {label} - {text_stripped[:50]}...")
+                                    is_duplicate = True
                                 # If same speaker and new text contains the old text (it's an update/extension)
-                                if label == last_speaker and last_text in text_stripped:
+                                elif label == last_speaker and last_text in text_stripped and len(text_stripped) > len(last_text):
                                     transcripts[-1] = (label, text_stripped)
                                     updated_existing = True
+                                else:
+                                    # Check if this exact text already exists in recent entries (prevent repeats)
+                                    # Check last 3 entries to catch duplicates
+                                    for entry in transcripts[-3:]:
+                                        entry_speaker, entry_text = entry
+                                        if entry_speaker == label and entry_text == text_stripped:
+                                            is_duplicate = True
+                                            logger.debug(f"⏭️  Skipping duplicate final transcript (found in recent entries): {label} - {text_stripped[:50]}...")
+                                            break
                             
-                            if not updated_existing:
-                                if not transcripts or transcripts[-1][1] != text_stripped:
-                                    transcripts.append((label, text_stripped))
-                                    logger.info(f"Stored transcript {len(transcripts)}: {label} - {text_stripped[:50]}...")
+                            if not updated_existing and not is_duplicate:
+                                transcripts.append((label, text_stripped))
+                                logger.info(f"Stored transcript {len(transcripts)}: {label} - {text_stripped[:50]}...")
                             
                             # Always display the final transcript
                             print(f"[Final] {label}: {text}")
                             lines = [f"{sp}: {t}" for sp, t in transcripts]
                             print("\n📝 Full Transcript so far:\n" + "\n".join(lines) + "\n")
                             
+                            # Update JSON file incrementally for final event
+                            try:
+                                update_transcript_incremental(room_name, label, text_stripped, is_final=True)
+                            except Exception as e:
+                                logger.error(f"❌ Error updating transcript incrementally: {e}")
+                            
                             # Update transcript manager's internal list (but don't broadcast)
                             # This allows the API server to retrieve transcripts when requested
                             asyncio.create_task(
-                                transcript_manager.update_transcripts(label, text_stripped)
+                                transcript_manager.update_transcripts(label, text_stripped, is_final=True)
                             )
                             
                             # Also sync to API server in real-time so it has the latest transcripts
@@ -246,7 +270,7 @@ class DiarizationAgent(Agent):
                                             api_url = os.getenv("API_SERVER_URL", "http://localhost:8000")
                                             async with session.post(
                                                 f"{api_url}/transcripts/update",
-                                                json={"transcripts": transcripts, "room_name": self.ctx.room.name if self.ctx.room else "Meeting"}
+                                                json={"transcripts": transcripts, "room_name": room_name}
                                             ) as resp:
                                                 if resp.status != 200:
                                                     logger.debug(f"Failed to sync transcript to API server: {resp.status}")
@@ -261,9 +285,19 @@ class DiarizationAgent(Agent):
                             # Transcripts will be sent when "stop recording" is detected or button is pressed
                             
                         else:
-                            # Interim transcript - just display, never store
+                            # Interim transcript - update JSON file in real-time as words come in
                             print(f"[Interim] {label}: {text}")
-                            # Don't broadcast interim transcripts either
+                            
+                            # Update JSON file incrementally for interim event
+                            try:
+                                update_transcript_incremental(room_name, label, text_stripped, is_final=False)
+                            except Exception as e:
+                                logger.error(f"❌ Error updating transcript incrementally (interim): {e}")
+                            
+                            # Update transcript manager's internal list for interim events
+                            asyncio.create_task(
+                                transcript_manager.update_transcripts(label, text_stripped, is_final=False)
+                            )
 
                 yield ev
 
