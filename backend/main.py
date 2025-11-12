@@ -23,7 +23,6 @@ except ImportError:
     PortAudioError = None
 
 stop_flag = asyncio.Event()
-handoff_flag = asyncio.Event()
 load_dotenv(".env.local")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("diarizer")
@@ -48,7 +47,6 @@ logging.getLogger("livekit.rtc.participant").setLevel(
 transcripts: List[Tuple[str, str]] = []
 speaker_label_map: Dict[str, str] = {}
 next_speaker_num: int = 1
-shutdown_requested = False
 
 # Get transcript manager for WebSocket broadcasting
 transcript_manager = get_transcript_manager()
@@ -93,14 +91,10 @@ class sampingAgent(Agent):
                     if ev.type and "FINAL" in ev.type.upper():
                         alt = ev.alternatives[0]  # livekit.agents.stt.SpeechData
                         text = alt.text or ""
-                        print(text)
+                        logger.debug(f"Sampling text: {text}")
                         if "stop sampling" in text.lower():
                             self.done_sampling = True
-                            logger.info(
-                                "📢 'Done sampling' detected - setting handoff flag..."
-                            )
-                            # Set the handoff flag to trigger handoff in entrypoint
-                            handoff_flag.set()
+                            logger.info("📢 'Done sampling' detected")
 
                         else:
                             spk = getattr(
@@ -114,18 +108,18 @@ class sampingAgent(Agent):
                                     speaker_name: str
                                     speaker_id: int
 
-                                print(text)
+                                logger.debug(f"Extracting speaker name from text: {text}")
                                 chatModel = ChatOpenAI(
                                     model="gpt-4o-mini", temperature=0
                                 ).with_structured_output(responseSchema)
                                 response = chatModel.invoke(
                                     f"for the given text {text}, please give me the unique speaker's name and match with thier speaker_id which is {spk} if speaker name is not mentioned in the text, please give me the name as 'unknown'"
                                 )
-                                print(response)
+                                logger.debug(f"Speaker extraction response: {response}")
                                 if response.speaker_name == "unknown":
                                     continue
                                 else:
-                                    print(
+                                    logger.info(
                                         f"Speaker name: {response.speaker_name} and speaker id: {spk}"
                                     )
                                     speaker_label_map[spk] = response.speaker_name
@@ -176,12 +170,12 @@ class DiarizationAgent(Agent):
         Consume SpeechEvents from the base STT node and print transcripts with speaker labels.
         Correctly reads diarization from alt.speaker_id for both partial and final events.
         """
-        print("diarization agent initialized")
+        logger.info("Diarization agent initialized")
 
         async def _transcribe():
             async for ev in Agent.default.stt_node(self, audio, model_settings):
                 if isinstance(ev, stt.SpeechEvent) and ev.alternatives:
-                    print(ev)
+                    logger.debug(f"Speech event: {ev}")
                     alt = ev.alternatives[0]  # livekit.agents.stt.SpeechData
                     text = alt.text or ""
                     spk = getattr(alt, "speaker_id", None)  # <-- canonical field

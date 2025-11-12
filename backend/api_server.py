@@ -870,6 +870,7 @@ def get_current_user(
         )
     return user
 
+
 @app.get("/")
 async def root():
     """Root endpoint - returns API information"""
