@@ -7,14 +7,27 @@ import asyncio
 import json
 import logging
 from typing import Set, Dict, List, Tuple, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from sqlalchemy.orm import Session
+from database.database import get_db, init_db
+from auth import (
+    authenticate_user,
+    create_user,
+    create_access_token,
+    get_user_by_username,
+    get_user_by_email,
+    verify_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    timedelta,
+)
 
 load_dotenv(".env.local")
 
@@ -795,6 +808,14 @@ transcript_manager = TranscriptManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("API server starting up...")
+    # Initialize database tables
+    try:
+        init_db()
+        logger.info("✅ Database initialized")
+    except Exception as e:
+        logger.error(f"❌ Database initialization error: {e}")
+        logger.error("⚠️  Server will start but authentication features may not work properly.")
+        logger.error("⚠️  Please check your DATABASE_URL in .env.local and ensure PostgreSQL is running.")
     # Set the event loop for the file watcher
     transcript_manager.file_watcher.set_event_loop(asyncio.get_running_loop())
     # Start file observer for transcript files
@@ -816,10 +837,287 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# JWT Security
+security = HTTPBearer()
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+):
+    """Dependency to get current authenticated user"""
+    token = credentials.credentials
+    payload = verify_token(token)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    username: str = payload.get("sub")
+    if username is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = get_user_by_username(db, username=username)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
 
 @app.get("/")
 async def root():
-    return {"message": "Transcript API Server", "status": "running"}
+    """Root endpoint - returns API information"""
+    return {
+        "message": "Transcript API Server",
+        "status": "running",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "database_health": "/health/db",
+            "authentication": {
+                "signup": "POST /auth/signup",
+                "login": "POST /auth/login",
+                "current_user": "GET /auth/me"
+            },
+            "transcripts": {
+                "list": "GET /transcripts/list",
+                "get": "GET /transcripts?meeting_name=<name>",
+                "update": "POST /transcripts/update"
+            },
+            "livekit": {
+                "token": "POST /token"
+            },
+            "websocket": "WS /ws/transcripts"
+        },
+        "docs": "/docs"
+    }
+
+
+@app.get("/api/endpoints")
+async def list_endpoints():
+    """List all available API endpoints"""
+    endpoints = {
+        "authentication": [
+            {
+                "method": "POST",
+                "path": "/auth/signup",
+                "description": "Register a new user",
+                "body": {"username": "string", "email": "string", "password": "string"},
+                "response": "TokenResponse with access_token and user info"
+            },
+            {
+                "method": "POST",
+                "path": "/auth/login",
+                "description": "Authenticate user and get JWT token",
+                "body": {"username": "string", "password": "string"},
+                "response": "TokenResponse with access_token and user info"
+            },
+            {
+                "method": "GET",
+                "path": "/auth/me",
+                "description": "Get current authenticated user information",
+                "auth_required": True,
+                "response": "User object"
+            }
+        ],
+        "health": [
+            {
+                "method": "GET",
+                "path": "/health",
+                "description": "Check API server health"
+            },
+            {
+                "method": "GET",
+                "path": "/health/db",
+                "description": "Check database connection"
+            }
+        ],
+        "transcripts": [
+            {
+                "method": "GET",
+                "path": "/transcripts/list",
+                "description": "List all available transcripts",
+                "auth_required": True
+            },
+            {
+                "method": "GET",
+                "path": "/transcripts?meeting_name=<name>",
+                "description": "Get transcript for a specific meeting",
+                "auth_required": True,
+                "query_params": {"meeting_name": "string (optional)"}
+            },
+            {
+                "method": "POST",
+                "path": "/transcripts/update",
+                "description": "Update transcripts from main.py process",
+                "body": {"transcripts": "array", "room_name": "string"}
+            }
+        ],
+        "livekit": [
+            {
+                "method": "POST",
+                "path": "/token",
+                "description": "Generate LiveKit access token for a room",
+                "auth_required": True,
+                "body": {"room_name": "string", "identity": "string (optional)"}
+            }
+        ],
+        "websocket": [
+            {
+                "method": "WS",
+                "path": "/ws/transcripts",
+                "description": "WebSocket connection for real-time transcript updates"
+            }
+        ]
+    }
+    return {
+        "endpoints": endpoints,
+        "base_url": "http://localhost:8000",
+        "documentation": "/docs",
+        "openapi_spec": "/openapi.json"
+    }
+
+
+@app.get("/health/db")
+async def check_database(db: Session = Depends(get_db)):
+    """Check database connection"""
+    try:
+        # Try a simple query
+        from database.models import User
+        db.query(User).first()
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database connection failed: {str(e)}"
+        )
+
+
+# Authentication endpoints
+class UserSignup(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+
+
+@app.post("/auth/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def signup(user_data: UserSignup, db: Session = Depends(get_db)):
+    """Register a new user"""
+    # Check if username already exists
+    if get_user_by_username(db, user_data.username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+    
+    # Check if email already exists
+    if get_user_by_email(db, user_data.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create new user
+    try:
+        user = create_user(
+            db,
+            username=user_data.username,
+            email=user_data.email,
+            password=user_data.password
+        )
+        
+        # Create access token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.username}, expires_delta=access_token_expires
+        )
+        
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user={
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "is_active": user.is_active
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error creating user: {e}", exc_info=True)
+        error_detail = str(e)
+        # Check if it's a database connection error
+        if "connection" in error_detail.lower() or "database" in error_detail.lower():
+            error_detail = "Database connection error. Please check your database configuration."
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating user: {error_detail}"
+        )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(user_data: UserLogin, db: Session = Depends(get_db)):
+    """Authenticate user and return JWT token"""
+    user = authenticate_user(db, user_data.username, user_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive"
+        )
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user={
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "is_active": user.is_active
+        }
+    )
+
+
+@app.get("/auth/me")
+async def get_current_user_info(current_user = Depends(get_current_user)):
+    """Get current authenticated user information"""
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "is_active": current_user.is_active,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None
+    }
+
 
 
 @app.get("/health")
@@ -837,6 +1135,7 @@ async def get_transcripts(
     meeting_name: Optional[str] = Query(
         None, description="Meeting name to retrieve transcript for"
     ),
+    current_user = Depends(get_current_user),
 ):
     """Get transcripts - either from file (if meeting_name provided) or from memory"""
     if meeting_name:
@@ -861,7 +1160,7 @@ async def get_transcripts(
 
 
 @app.get("/transcripts/list")
-async def list_all_transcripts():
+async def list_all_transcripts(current_user = Depends(get_current_user)):
     """List all available transcripts from the transcripts directory"""
     try:
         transcript_files = []
@@ -933,7 +1232,7 @@ class TokenRequest(BaseModel):
 
 
 @app.post("/token")
-async def generate_token(request: TokenRequest):
+async def generate_token(request: TokenRequest, current_user = Depends(get_current_user)):
     """Generate a LiveKit access token for a room"""
     try:
         from livekit import api

@@ -1,3 +1,5 @@
+import { authService } from './authService'
+
 const API_URL = import.meta.env.VITE_HTTP_API_URL || import.meta.env.VITE_API_URL?.replace('ws://', 'http://').replace('wss://', 'https://') || 'http://localhost:8000'
 
 export interface TokenResponse {
@@ -21,6 +23,7 @@ export async function getLiveKitToken(roomName: string, identity?: string): Prom
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...authService.getAuthHeaders(),
     },
     body: JSON.stringify(requestBody),
   })
