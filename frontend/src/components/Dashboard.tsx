@@ -15,16 +15,20 @@ interface TranscriptFile {
   file_name: string
   total_entries: number
   last_modified: number
+  isCurrent?: boolean
 }
 
 export function Dashboard() {
   const [transcripts, setTranscripts] = useState<Transcript[]>([])
+  const [realtimeUpdates, setRealtimeUpdates] = useState<Transcript[]>([])
+  const [displayText, setDisplayText] = useState<string>('')
   const [meetingTitle, setMeetingTitle] = useState<string | null>(null)
   const [wsConnected, setWsConnected] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [roomName, setRoomName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
+  const realtimeUpdatesEndRef = useRef<HTMLDivElement>(null)
   const [availableTranscripts, setAvailableTranscripts] = useState<TranscriptFile[]>([])
   const [selectedMeeting, setSelectedMeeting] = useState<string | null>(null)
   const [loadingTranscripts, setLoadingTranscripts] = useState(false)
@@ -33,6 +37,7 @@ export function Dashboard() {
   const navigate = useNavigate()
   const roomNameRef = useRef<string>(roomName)
   const isRecordingRef = useRef<boolean>(isRecording)
+  const selectedMeetingRef = useRef<string | null>(selectedMeeting)
   
   // Keep refs in sync with state
   useEffect(() => {
@@ -42,6 +47,10 @@ export function Dashboard() {
   useEffect(() => {
     isRecordingRef.current = isRecording
   }, [isRecording])
+  
+  useEffect(() => {
+    selectedMeetingRef.current = selectedMeeting
+  }, [selectedMeeting])
   
   const [transcriptService] = useState(() => {
     try {
@@ -96,62 +105,77 @@ export function Dashboard() {
         setWsConnected(true)
       })
 
-      const handleRealtimeTranscript = (transcript: Transcript, meetingName?: string) => {
-        const currentRoomName = roomNameRef.current
+      const handleRealtimeTranscript = (transcript: Transcript, _meetingName?: string) => {
         const currentlyRecording = isRecordingRef.current
+        const currentSelectedMeeting = selectedMeetingRef.current
         
-        setSelectedMeeting(prevSelected => {
-          const shouldUpdate = currentlyRecording || 
-                               !prevSelected || 
-                               !meetingName || 
-                               (meetingName && prevSelected === meetingName) ||
-                               (meetingName && currentRoomName === meetingName);
-          
-          if (shouldUpdate) {
-            setTranscripts((prevTranscripts) => {
-              const lastIndex = prevTranscripts.length - 1;
-              const lastTranscript = prevTranscripts[lastIndex];
-              
-              if (lastTranscript && 
-                  lastTranscript.speaker === transcript.speaker && 
-                  !lastTranscript.is_final && 
-                  !transcript.is_final) {
-                const updated = [...prevTranscripts];
-                updated[lastIndex] = transcript;
-                return updated;
-              } 
-              else if (lastTranscript && 
-                       lastTranscript.speaker === transcript.speaker && 
-                       !lastTranscript.is_final && 
-                       transcript.is_final) {
-                const updated = [...prevTranscripts];
-                updated[lastIndex] = transcript;
-                return updated;
-              }
-              else if (lastTranscript && 
-                       lastTranscript.speaker === transcript.speaker && 
-                       lastTranscript.is_final && 
-                       transcript.is_final &&
-                       lastTranscript.text && 
-                       transcript.text.includes(lastTranscript.text)) {
-                const updated = [...prevTranscripts];
-                updated[lastIndex] = transcript;
-                return updated;
-              }
-              else {
-                return [...prevTranscripts, transcript];
-              }
-            });
-            
-            if (meetingName) {
-              setMeetingTitle(prev => prev || meetingName);
-              if (!prevSelected || prevSelected !== meetingName) {
-                return meetingName;
-              }
-            }
+        // Always add to real-time updates section
+        setRealtimeUpdates((prev) => {
+          const lastIndex = prev.length - 1;
+          const lastUpdate = prev[lastIndex];
+
+          // Update last entry if same speaker and interim, or append new
+          if (lastUpdate && 
+              lastUpdate.speaker === transcript.speaker && 
+              !lastUpdate.is_final && 
+              !transcript.is_final) {
+            const updated = [...prev];
+            updated[lastIndex] = transcript;
+            return updated;
+          } 
+          else if (lastUpdate && 
+                   lastUpdate.speaker === transcript.speaker && 
+                   !lastUpdate.is_final && 
+                   transcript.is_final) {
+            const updated = [...prev];
+            updated[lastIndex] = transcript;
+            return updated;
           }
-          return prevSelected
-        })
+          else {
+            return [...prev, transcript];
+          }
+        });
+
+        // During recording OR when watching a specific meeting, ALWAYS update transcripts
+        const shouldUpdate = currentlyRecording || currentSelectedMeeting;
+        
+        if (shouldUpdate) {
+          setTranscripts((prevTranscripts) => {
+            const lastIndex = prevTranscripts.length - 1;
+            const lastTranscript = prevTranscripts[lastIndex];
+
+            let updatedTranscripts;
+
+            if (lastTranscript && 
+                lastTranscript.speaker === transcript.speaker && 
+                !lastTranscript.is_final && 
+                !transcript.is_final) {
+              updatedTranscripts = [...prevTranscripts];
+              updatedTranscripts[lastIndex] = transcript;
+            } 
+            else if (lastTranscript && 
+                     lastTranscript.speaker === transcript.speaker && 
+                     !lastTranscript.is_final && 
+                     transcript.is_final) {
+              updatedTranscripts = [...prevTranscripts];
+              updatedTranscripts[lastIndex] = transcript;
+            }
+            else if (lastTranscript && 
+                     lastTranscript.speaker === transcript.speaker && 
+                     lastTranscript.is_final && 
+                     transcript.is_final &&
+                     lastTranscript.text && 
+                     transcript.text.includes(lastTranscript.text)) {
+              updatedTranscripts = [...prevTranscripts];
+              updatedTranscripts[lastIndex] = transcript;
+            }
+            else {
+              updatedTranscripts = [...prevTranscripts, transcript];
+            }
+
+            return updatedTranscripts;
+          });
+        }
       };
 
       transcriptService.connect(
@@ -181,12 +205,58 @@ export function Dashboard() {
   }, [transcriptService])
 
   useEffect(() => {
-    if (transcripts.length > 0) {
+    if (displayText) {
       setTimeout(() => {
         transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
       }, 100)
     }
-  }, [transcripts])
+  }, [displayText])
+
+  useEffect(() => {
+    if (realtimeUpdates.length > 0) {
+      setTimeout(() => {
+        realtimeUpdatesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      }, 100)
+    }
+  }, [realtimeUpdates])
+
+  // Update displayText when transcripts change (for BOTH recording and watching)
+  useEffect(() => {
+    // Update displayText whenever transcripts change (during recording OR watching)
+    if ((isRecording || selectedMeeting) && transcripts.length > 0) {
+      // Build text from transcripts for display
+      let newText = '';
+      let lastFinalIdx = -1;
+      
+      // Find the last final transcript index
+      for (let i = transcripts.length - 1; i >= 0; i--) {
+        if (transcripts[i]?.is_final) {
+          lastFinalIdx = i;
+          break;
+        }
+      }
+      
+      // Add all final transcripts (each on a new line)
+      for (let i = 0; i <= lastFinalIdx; i++) {
+        if (transcripts[i]?.is_final && transcripts[i].text) {
+          newText += transcripts[i].text.trim() + '\n';
+        }
+      }
+      
+      // Add current interim transcript if it exists (appends to current line)
+      if (lastFinalIdx < transcripts.length - 1) {
+        const currentInterim = transcripts[transcripts.length - 1];
+        if (!currentInterim.is_final && currentInterim.text) {
+          newText += currentInterim.text.trim();
+        }
+      }
+      
+      setDisplayText(newText);
+    } else if ((isRecording || selectedMeeting) && transcripts.length === 0) {
+      // Clear displayText when starting a new recording or watching empty transcript
+      setDisplayText('');
+    }
+  }, [transcripts, selectedMeeting, isRecording])
 
   const refreshTranscriptsList = async () => {
     try {
@@ -380,7 +450,37 @@ export function Dashboard() {
       setError(null)
       setIsRecording(true)
       setTranscripts([])
+      setRealtimeUpdates([])
+      setDisplayText('')
       setMeetingTitle(null)
+
+      // Add current meeting to available transcripts list immediately
+      const currentTimestamp = Math.floor(Date.now() / 1000)
+      const newMeeting: TranscriptFile = {
+        meeting_name: roomName,
+        file_name: `${roomName}.json`,
+        total_entries: 0,
+        last_modified: currentTimestamp,
+        isCurrent: true
+      }
+      
+      // Check if meeting already exists in the list
+      setAvailableTranscripts(prev => {
+        const existingIndex = prev.findIndex(t => t.meeting_name === roomName)
+        if (existingIndex >= 0) {
+          // Update existing entry to mark as current
+          const updated = [...prev]
+          updated[existingIndex] = { ...updated[existingIndex], isCurrent: true, last_modified: currentTimestamp }
+          return updated
+        } else {
+          // Add new entry at the beginning
+          return [newMeeting, ...prev]
+        }
+      })
+      
+      // Set selected meeting to current room so transcripts update correctly
+      setSelectedMeeting(roomName)
+      setMeetingTitle(roomName)
 
       const tokenData = await getLiveKitToken(roomName)
       await liveKitService.connect(tokenData.url, tokenData.token, tokenData.room_name)
@@ -388,6 +488,11 @@ export function Dashboard() {
       console.error('❌ Failed to start recording:', err)
       setError(err instanceof Error ? err.message : 'Failed to start recording')
       setIsRecording(false)
+      
+      // Remove isCurrent flag if recording failed
+      setAvailableTranscripts(prev => 
+        prev.map(t => t.meeting_name === roomName ? { ...t, isCurrent: false } : t)
+      )
     }
   }
 
@@ -403,6 +508,51 @@ export function Dashboard() {
       
       // Wait a moment for the backend to finish processing and save the transcript
       await new Promise(resolve => setTimeout(resolve, 1000))
+      
+      // Update meeting entry in available transcripts: remove isCurrent flag and update counts
+      if (roomName) {
+        const finalCount = transcripts.length
+        const currentTimestamp = Math.floor(Date.now() / 1000)
+        
+        setAvailableTranscripts(prev => 
+          prev.map(t => 
+            t.meeting_name === roomName 
+              ? { 
+                  ...t, 
+                  isCurrent: false, 
+                  total_entries: finalCount,
+                  last_modified: currentTimestamp
+                } 
+              : t
+          )
+        )
+        
+        // Call stop recording endpoint to store in vector DB and delete JSON file
+        try {
+          const response = await fetch(`${HTTP_API_URL}/transcripts/stop-recording`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...authService.getAuthHeaders(),
+            },
+            body: JSON.stringify({ meeting_name: roomName })
+          })
+          
+          if (response.ok) {
+            const data = await response.json()
+            console.log('Stop recording response:', data)
+            if (data.stored_to_vector_db) {
+              console.log('✅ Transcript stored in vector database')
+            }
+          } else {
+            const errorData = await response.json().catch(() => ({ message: 'Unknown error' }))
+            console.warn('Stop recording endpoint returned error:', errorData)
+          }
+        } catch (err) {
+          console.error('Failed to call stop recording endpoint:', err)
+          // Continue with fallback logic
+        }
+      }
       
       if (transcriptService && roomName) {
         setMeetingTitle(roomName)
@@ -712,33 +862,58 @@ export function Dashboard() {
               <button
                 key={transcript.file_name}
                 onClick={() => loadTranscript(transcript.file_name)}
-                disabled={loadingTranscripts}
+                disabled={loadingTranscripts || transcript.isCurrent}
                 style={{
                   padding: '12px',
-                  background: selectedMeeting === transcript.file_name ? '#007bff' : '#f8f9fa',
-                  color: selectedMeeting === transcript.file_name ? 'white' : '#333',
-                  border: `2px solid ${selectedMeeting === transcript.file_name ? '#007bff' : '#ddd'}`,
+                  background: selectedMeeting === transcript.file_name ? '#007bff' : transcript.isCurrent ? '#fff5f5' : '#f8f9fa',
+                  color: selectedMeeting === transcript.file_name ? 'white' : transcript.isCurrent ? '#dc3545' : '#333',
+                  border: `2px solid ${selectedMeeting === transcript.file_name ? '#007bff' : transcript.isCurrent ? '#dc3545' : '#ddd'}`,
                   borderRadius: '8px',
-                  cursor: loadingTranscripts ? 'not-allowed' : 'pointer',
+                  cursor: loadingTranscripts || transcript.isCurrent ? 'not-allowed' : 'pointer',
                   textAlign: 'left',
                   transition: 'all 0.2s ease',
-                  opacity: loadingTranscripts ? 0.6 : 1
+                  opacity: loadingTranscripts ? 0.6 : 1,
+                  position: 'relative'
                 }}
                 onMouseEnter={(e) => {
-                  if (!loadingTranscripts && selectedMeeting !== transcript.file_name) {
+                  if (!loadingTranscripts && selectedMeeting !== transcript.file_name && !transcript.isCurrent) {
                     e.currentTarget.style.background = '#e9ecef'
                     e.currentTarget.style.borderColor = '#007bff'
                   }
                 }}
                 onMouseLeave={(e) => {
                   if (!loadingTranscripts && selectedMeeting !== transcript.file_name) {
-                    e.currentTarget.style.background = '#f8f9fa'
-                    e.currentTarget.style.borderColor = '#ddd'
+                    e.currentTarget.style.background = transcript.isCurrent ? '#fff5f5' : '#f8f9fa'
+                    e.currentTarget.style.borderColor = transcript.isCurrent ? '#dc3545' : '#ddd'
                   }
                 }}
               >
-                <div style={{ fontWeight: '600', marginBottom: '4px' }}>
-                  {transcript.meeting_name}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <div style={{ fontWeight: '600' }}>
+                    {transcript.meeting_name}
+                  </div>
+                  {transcript.isCurrent && (
+                    <span style={{
+                      fontSize: '10px',
+                      backgroundColor: '#dc3545',
+                      color: 'white',
+                      padding: '2px 6px',
+                      borderRadius: '3px',
+                      fontWeight: '600',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px'
+                    }}>
+                      <span style={{
+                        width: '6px',
+                        height: '6px',
+                        borderRadius: '50%',
+                        backgroundColor: 'white',
+                        animation: 'pulse 1.5s infinite'
+                      }} />
+                      Recording
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontSize: '12px', opacity: 0.8 }}>
                   {transcript.total_entries} {transcript.total_entries === 1 ? 'entry' : 'entries'}
@@ -748,6 +923,84 @@ export function Dashboard() {
                 </div>
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Current Meeting Section */}
+      {((isRecording && roomName) || (selectedMeeting && !isRecording)) && (
+        <div style={{ 
+          marginTop: '20px',
+          padding: '20px',
+          background: 'white',
+          borderRadius: '5px',
+          border: isRecording ? '2px solid #dc3545' : '2px solid #007bff',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }}>
+          <h3 style={{ 
+            marginTop: 0, 
+            marginBottom: '15px',
+            fontSize: '20px',
+            fontWeight: '600',
+            color: isRecording ? '#dc3545' : '#007bff',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px'
+          }}>
+            <span style={{
+              width: '12px',
+              height: '12px',
+              borderRadius: '50%',
+              background: isRecording ? '#dc3545' : '#007bff',
+              animation: 'pulse 1.5s infinite'
+            }} />
+            {isRecording ? `Current Meeting: ${roomName}` : `Watching: ${selectedMeeting}`}
+          </h3>
+          <div style={{ 
+            maxHeight: '400px',
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            padding: '15px',
+            background: '#ffffff',
+            borderRadius: '8px',
+            border: '1px solid #e0e0e0',
+            fontFamily: 'system-ui, -apple-system, sans-serif',
+            fontSize: '16px',
+            lineHeight: '1.6',
+            color: '#333'
+          }}>
+            {displayText ? (
+              <pre style={{
+                margin: 0,
+                padding: 0,
+                whiteSpace: 'pre-wrap',
+                wordWrap: 'break-word',
+                fontFamily: 'inherit',
+                fontSize: 'inherit',
+                lineHeight: 'inherit',
+                color: 'inherit',
+                background: 'transparent',
+                border: 'none'
+              }}>
+                {displayText}
+              </pre>
+            ) : (
+              <div style={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'center',
+                padding: '40px',
+                color: '#999',
+                fontStyle: 'italic'
+              }}>
+                <p style={{ margin: 0, textAlign: 'center' }}>
+                  {isRecording 
+                    ? '🎙️ Recording in progress... Transcripts will appear here in real-time as you speak.'
+                    : '👁️ Watching meeting... Real-time transcripts will appear here.'}
+                </p>
+              </div>
+            )}
+            <div ref={transcriptEndRef} style={{ height: '1px' }} />
           </div>
         </div>
       )}
@@ -868,6 +1121,118 @@ export function Dashboard() {
               );
             })}
             <div ref={transcriptEndRef} style={{ height: '1px' }} />
+          </div>
+        )}
+
+        {/* Real-time Updates Section */}
+        {isRecording && realtimeUpdates.length > 0 && (
+          <div style={{
+            marginTop: '30px',
+            padding: '20px',
+            backgroundColor: '#f8f9fa',
+            borderRadius: '8px',
+            border: '1px solid #e0e0e0'
+          }}>
+            <h3 style={{
+              margin: '0 0 15px 0',
+              color: '#007bff',
+              fontSize: '18px',
+              fontWeight: '600',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <span style={{
+                display: 'inline-block',
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: '#28a745',
+                animation: 'pulse 2s infinite'
+              }} />
+              Real-time Updates
+            </h3>
+            <div style={{
+              maxHeight: '300px',
+              overflowY: 'auto',
+              padding: '10px',
+              backgroundColor: '#fff',
+              borderRadius: '4px',
+              border: '1px solid #ddd'
+            }}>
+              {realtimeUpdates.map((t, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    marginBottom: '12px',
+                    padding: '10px',
+                    backgroundColor: t.is_final ? '#f0f8ff' : '#fff9e6',
+                    borderRadius: '4px',
+                    borderLeft: `3px solid ${t.is_final ? '#007bff' : '#ffc107'}`,
+                    opacity: t.is_final ? 1 : 0.8
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '5px' }}>
+                    {t.speaker && (
+                      <div style={{
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '50%',
+                        backgroundColor: '#007bff',
+                        color: '#fff',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '12px',
+                        fontWeight: 'bold'
+                      }}>
+                        {(t.speaker || 'U').charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <strong style={{ color: '#007bff', fontSize: '14px' }}>
+                        {t.speaker || 'Unknown Speaker'}
+                      </strong>
+                      {!t.is_final && (
+                        <span style={{
+                          fontSize: '11px',
+                          color: '#ffc107',
+                          backgroundColor: '#fff9e6',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          fontWeight: '500'
+                        }}>
+                          Interim
+                        </span>
+                      )}
+                      {t.is_final && (
+                        <span style={{
+                          fontSize: '11px',
+                          color: '#28a745',
+                          backgroundColor: '#f0f8ff',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          fontWeight: '500'
+                        }}>
+                          Final
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <p style={{
+                    margin: 0,
+                    color: '#333',
+                    lineHeight: '1.6',
+                    fontSize: '14px',
+                    whiteSpace: 'pre-wrap',
+                    wordWrap: 'break-word'
+                  }}>
+                    {t.text}
+                  </p>
+                </div>
+              ))}
+              <div ref={realtimeUpdatesEndRef} style={{ height: '1px' }} />
+            </div>
           </div>
         )}
       </div>

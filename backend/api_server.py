@@ -55,9 +55,16 @@ def get_transcript_file_path(meeting_name: str) -> Path:
 
 
 def save_transcript_to_file(
-    meeting_name: str, transcripts: List[Tuple[str, str]]
+    meeting_name: str, transcripts: List[Tuple[str, str]], delete_after_storage: bool = False
 ) -> Path:
-    """Save transcripts to a JSON file, then store in vector DB and delete JSON file"""
+    """Save transcripts to a JSON file. Optionally store in vector DB and delete JSON file.
+    
+    Args:
+        meeting_name: Name of the meeting
+        transcripts: List of (speaker, text) tuples
+        delete_after_storage: If True, store to vector DB and delete JSON file. 
+                             If False, only save to JSON file (default).
+    """
     file_path = get_transcript_file_path(meeting_name)
     
     # Get user_id from room mapping to include in metadata
@@ -86,6 +93,10 @@ def save_transcript_to_file(
             f"💾 Saved transcript to {file_path.absolute()} ({len(transcripts)} entries)"
         )
         logger.info(f"📂 Full path: {file_path.resolve()}")
+        
+        # Only store in vector DB and delete JSON file if explicitly requested
+        if not delete_after_storage:
+            return file_path
         
         # Now store in vector DB and delete JSON file
         try:
@@ -626,6 +637,15 @@ class TranscriptFileWatcher(FileSystemEventHandler):
         # Extract meeting name from filename
         meeting_name = file_path.stem
 
+        # Check if file still exists (it might have been moved to vector DB)
+        if not file_path.exists():
+            logger.debug(f"File '{meeting_name}.json' was deleted/moved (likely stored in vector DB)")
+            # Remove watchers for this file since it's been archived
+            if meeting_name in self.watched_files:
+                self.watched_files.pop(meeting_name, None)
+                self.last_known_state.pop(meeting_name, None)
+            return
+
         # Only process if someone is watching this file
         if meeting_name not in self.watched_files:
             logger.debug(f"File '{meeting_name}.json' changed but no watchers")
@@ -705,6 +725,12 @@ class TranscriptFileWatcher(FileSystemEventHandler):
             elif new_count < last_count:
                 self.last_known_state[meeting_name] = new_data
 
+        except FileNotFoundError:
+            logger.debug(f"⚠️ Watchdog: File '{meeting_name}.json' was deleted during processing (likely moved to vector DB)")
+            # Clean up watchers for this file
+            if meeting_name in self.watched_files:
+                self.watched_files.pop(meeting_name, None)
+                self.last_known_state.pop(meeting_name, None)
         except json.JSONDecodeError as e:
             logger.warning(f"⚠️ Watchdog: JSON decode error for '{meeting_name}': {e} - file might be partially written")
         except Exception as e:
@@ -1921,6 +1947,211 @@ async def update_transcripts_from_main(request: TranscriptUpdateRequest):
 class TokenRequest(BaseModel):
     room_name: str
     identity: Optional[str] = None
+
+
+class StopRecordingRequest(BaseModel):
+    meeting_name: str
+
+
+@app.post("/transcripts/stop-recording")
+async def stop_recording(
+    request: StopRecordingRequest,
+    current_user = Depends(get_current_user)
+):
+    """
+    Stop recording: Store transcript to vector DB and delete JSON file.
+    Called when user clicks stop recording button.
+    """
+    meeting_name = request.meeting_name
+    user_id = current_user.id
+    
+    # Verify user owns this meeting
+    room_user_id = get_user_id_for_room(meeting_name)
+    if room_user_id and room_user_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to stop this recording"
+        )
+    
+    file_path = get_transcript_file_path(meeting_name)
+    
+    if not file_path.exists():
+        return {
+            "status": "error",
+            "message": f"Transcript file not found for meeting: {meeting_name}",
+            "meeting_name": meeting_name
+        }
+    
+    try:
+        # Load transcript from JSON file
+        transcript_data = load_transcript_from_file(meeting_name, filter_interim=False)
+        if not transcript_data:
+            return {
+                "status": "error",
+                "message": f"Failed to load transcript from file",
+                "meeting_name": meeting_name
+            }
+        
+        transcripts_list = transcript_data.get("transcripts", [])
+        if not transcripts_list:
+            # Empty transcript - just delete the file
+            try:
+                file_path.unlink()
+                logger.info(f"🗑️  Deleted empty transcript file: {file_path}")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete empty JSON file: {e}")
+            
+            return {
+                "status": "ok",
+                "message": "Empty transcript file deleted",
+                "meeting_name": meeting_name,
+                "stored_to_vector_db": False
+            }
+        
+        # Convert to format needed for store_transcript
+        transcript_entries = [
+            (entry.get("speaker", "Unknown"), entry.get("text", ""))
+            for entry in transcripts_list
+            if entry.get("text", "").strip()  # Only non-empty entries
+        ]
+        
+        if not transcript_entries:
+            # No valid entries - delete file
+            try:
+                file_path.unlink()
+                logger.info(f"🗑️  Deleted transcript file with no valid entries: {file_path}")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete JSON file: {e}")
+            
+            return {
+                "status": "ok",
+                "message": "Transcript file deleted (no valid entries)",
+                "meeting_name": meeting_name,
+                "stored_to_vector_db": False
+            }
+        
+        # Store to vector DB and delete JSON file
+        try:
+            from vector_db.vector_store import store_transcript, get_redis_client
+            from datetime import datetime
+            import uuid
+            
+            # Get user_id (use room mapping if available, otherwise use current user)
+            storage_user_id = room_user_id if room_user_id else user_id
+            
+            # Check if transcript with same meeting_name already exists
+            client = get_redis_client()
+            keys = client.keys("transcript:*")
+            existing_meeting_id = None
+            
+            for key in keys:
+                data = client.hgetall(key)
+                stored_meeting_name = data.get(b'meeting_name')
+                stored_user_id = data.get(b'user_id')
+                
+                if stored_meeting_name and stored_user_id:
+                    stored_meeting_name_str = stored_meeting_name.decode('utf-8')
+                    stored_user_id_str = int(stored_user_id.decode('utf-8'))
+                    
+                    if stored_meeting_name_str == meeting_name and stored_user_id_str == storage_user_id:
+                        existing_meeting_id = key.decode('utf-8').replace('transcript:', '')
+                        break
+            
+            # Generate meeting_id
+            timestamp = datetime.now().timestamp()
+            meeting_id = existing_meeting_id if existing_meeting_id else f"{storage_user_id}_{meeting_name}_{int(timestamp)}"
+            
+            # Combine transcript entries into text
+            transcript_text_parts = []
+            speakers_set = set()
+            
+            for speaker, text in transcript_entries:
+                if text.strip():
+                    transcript_text_parts.append(f"{speaker}: {text.strip()}")
+                    speakers_set.add(speaker)
+            
+            transcript_text = "\n".join(transcript_text_parts)
+            speakers_list = sorted(list(speakers_set))
+            
+            if transcript_text:
+                # Store in vector DB
+                logger.info(f"📊 Storing transcript in vector DB: {meeting_name}")
+                stored_meeting_id = store_transcript(
+                    user_id=storage_user_id,
+                    meeting_name=meeting_name,
+                    transcript_text=transcript_text,
+                    speakers=speakers_list,
+                    timestamp=timestamp,
+                    meeting_id=meeting_id,
+                )
+                
+                if stored_meeting_id:
+                    # Successfully stored - delete JSON file
+                    try:
+                        file_path.unlink()
+                        logger.info(f"🗑️  Deleted JSON file after successful vector DB storage: {file_path}")
+                        return {
+                            "status": "ok",
+                            "message": "Transcript stored in vector database and JSON file deleted",
+                            "meeting_name": meeting_name,
+                            "stored_to_vector_db": True,
+                            "meeting_id": stored_meeting_id
+                        }
+                    except Exception as e:
+                        logger.warning(f"⚠️  Failed to delete JSON file {file_path}: {e}")
+                        return {
+                            "status": "partial",
+                            "message": "Transcript stored in vector DB but failed to delete JSON file",
+                            "meeting_name": meeting_name,
+                            "stored_to_vector_db": True,
+                            "error": str(e)
+                        }
+                else:
+                    logger.error(f"❌ Vector DB storage failed for '{meeting_name}'")
+                    return {
+                        "status": "error",
+                        "message": "Failed to store transcript in vector database",
+                        "meeting_name": meeting_name,
+                        "stored_to_vector_db": False
+                    }
+            else:
+                # Empty transcript text - just delete file
+                try:
+                    file_path.unlink()
+                    logger.info(f"🗑️  Deleted transcript file (empty text): {file_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to delete JSON file: {e}")
+                
+                return {
+                    "status": "ok",
+                    "message": "Transcript file deleted (empty transcript)",
+                    "meeting_name": meeting_name,
+                    "stored_to_vector_db": False
+                }
+                
+        except ImportError as e:
+            logger.warning(f"⚠️  Vector DB modules not available: {e}")
+            return {
+                "status": "error",
+                "message": "Vector DB modules not available",
+                "meeting_name": meeting_name,
+                "stored_to_vector_db": False
+            }
+        except Exception as e:
+            logger.error(f"❌ Error storing transcript in vector DB: {e}")
+            return {
+                "status": "error",
+                "message": f"Error storing transcript: {str(e)}",
+                "meeting_name": meeting_name,
+                "stored_to_vector_db": False
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error in stop_recording endpoint: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to stop recording: {str(e)}"
+        )
 
 
 @app.post("/token")
