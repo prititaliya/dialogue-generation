@@ -48,6 +48,31 @@ def check_database():
             return False
 
 
+def check_redis():
+    """Check if Redis is running and set up"""
+    try:
+        import redis
+        from dotenv import load_dotenv
+        load_dotenv(".env.local")
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        client = redis.from_url(redis_url, socket_connect_timeout=2)
+        client.ping()
+        return True
+    except ImportError:
+        print("⚠️  Redis package not installed. Vector DB features will be disabled.")
+        print("   Install with: pip install redis")
+        return False
+    except redis.ConnectionError:
+        print("⚠️  Redis server is not running. Vector DB features will be disabled.")
+        print("   Run: python setup_redis.py")
+        print("   Or start Redis manually: redis-server")
+        return False
+    except Exception as e:
+        print(f"⚠️  Redis connection issue: {e}")
+        print("   Run: python setup_redis.py")
+        return False
+
+
 def run_api_server():
     """Run the FastAPI server in a separate thread"""
     from api_server import app
@@ -67,6 +92,12 @@ if __name__ == "__main__":
     if not check_database():
         print("\n⚠️  Starting server anyway, but authentication may not work...")
         print("   Fix the database issue and restart the server.\n")
+    
+    # Check Redis before starting
+    if not check_redis():
+        print("\n⚠️  Starting server anyway, but vector DB features will be disabled...")
+        print("   Transcripts will be stored in JSON files only.")
+        print("   Run 'python setup_redis.py' to enable vector database storage.\n")
     
     # Start API server in a separate thread
     api_thread = threading.Thread(target=run_api_server, daemon=True)

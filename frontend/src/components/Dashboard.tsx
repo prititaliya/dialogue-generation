@@ -31,6 +31,17 @@ export function Dashboard() {
   const [initialLoadComplete, setInitialLoadComplete] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const navigate = useNavigate()
+  const roomNameRef = useRef<string>(roomName)
+  const isRecordingRef = useRef<boolean>(isRecording)
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    roomNameRef.current = roomName
+  }, [roomName])
+  
+  useEffect(() => {
+    isRecordingRef.current = isRecording
+  }, [isRecording])
   
   const [transcriptService] = useState(() => {
     try {
@@ -72,7 +83,6 @@ export function Dashboard() {
     
     try {
       const handleCompleteTranscript = (title: string, transcriptList: Transcript[]) => {
-        console.log('handleCompleteTranscript called:', { title, count: transcriptList.length });
         setMeetingTitle(title)
         setTranscripts(transcriptList)
         setSelectedMeeting(title)
@@ -87,49 +97,61 @@ export function Dashboard() {
       })
 
       const handleRealtimeTranscript = (transcript: Transcript, meetingName?: string) => {
-        console.log('Real-time transcript received:', transcript, 'for meeting:', meetingName);
+        const currentRoomName = roomNameRef.current
+        const currentlyRecording = isRecordingRef.current
         
-        const shouldUpdate = isRecording || 
-                             !selectedMeeting || 
-                             (meetingName && selectedMeeting === meetingName) ||
-                             (meetingTitle && meetingName && meetingTitle === meetingName);
-        
-        if (shouldUpdate) {
-          setTranscripts((prevTranscripts) => {
-            const lastIndex = prevTranscripts.length - 1;
-            const lastTranscript = prevTranscripts[lastIndex];
+        setSelectedMeeting(prevSelected => {
+          const shouldUpdate = currentlyRecording || 
+                               !prevSelected || 
+                               !meetingName || 
+                               (meetingName && prevSelected === meetingName) ||
+                               (meetingName && currentRoomName === meetingName);
+          
+          if (shouldUpdate) {
+            setTranscripts((prevTranscripts) => {
+              const lastIndex = prevTranscripts.length - 1;
+              const lastTranscript = prevTranscripts[lastIndex];
+              
+              if (lastTranscript && 
+                  lastTranscript.speaker === transcript.speaker && 
+                  !lastTranscript.is_final && 
+                  !transcript.is_final) {
+                const updated = [...prevTranscripts];
+                updated[lastIndex] = transcript;
+                return updated;
+              } 
+              else if (lastTranscript && 
+                       lastTranscript.speaker === transcript.speaker && 
+                       !lastTranscript.is_final && 
+                       transcript.is_final) {
+                const updated = [...prevTranscripts];
+                updated[lastIndex] = transcript;
+                return updated;
+              }
+              else if (lastTranscript && 
+                       lastTranscript.speaker === transcript.speaker && 
+                       lastTranscript.is_final && 
+                       transcript.is_final &&
+                       lastTranscript.text && 
+                       transcript.text.includes(lastTranscript.text)) {
+                const updated = [...prevTranscripts];
+                updated[lastIndex] = transcript;
+                return updated;
+              }
+              else {
+                return [...prevTranscripts, transcript];
+              }
+            });
             
-            if (lastTranscript && 
-                lastTranscript.speaker === transcript.speaker && 
-                !lastTranscript.is_final && 
-                !transcript.is_final) {
-              const updated = [...prevTranscripts];
-              updated[lastIndex] = transcript;
-              return updated;
-            } 
-            else if (lastTranscript && 
-                     lastTranscript.speaker === transcript.speaker && 
-                     !lastTranscript.is_final && 
-                     transcript.is_final) {
-              const updated = [...prevTranscripts];
-              updated[lastIndex] = transcript;
-              return updated;
+            if (meetingName) {
+              setMeetingTitle(prev => prev || meetingName);
+              if (!prevSelected || prevSelected !== meetingName) {
+                return meetingName;
+              }
             }
-            else if (lastTranscript && 
-                     lastTranscript.speaker === transcript.speaker && 
-                     lastTranscript.is_final && 
-                     transcript.is_final &&
-                     lastTranscript.text && 
-                     transcript.text.includes(lastTranscript.text)) {
-              const updated = [...prevTranscripts];
-              updated[lastIndex] = transcript;
-              return updated;
-            }
-            else {
-              return [...prevTranscripts, transcript];
-            }
-          });
-        }
+          }
+          return prevSelected
+        })
       };
 
       transcriptService.connect(
@@ -146,13 +168,15 @@ export function Dashboard() {
       if (unsubscribe) {
         unsubscribe()
       }
-      try {
-        if (transcriptService) {
-          transcriptService.disconnect()
+      setTimeout(() => {
+        try {
+          if (transcriptService) {
+            transcriptService.disconnect()
+          }
+        } catch (err) {
+          console.error('Error disconnecting:', err)
         }
-      } catch (err) {
-        console.error('Error disconnecting:', err)
-      }
+      }, 200)
     }
   }, [transcriptService])
 
@@ -199,7 +223,6 @@ export function Dashboard() {
         setMeetingTitle(data.meeting_name || meetingName)
         setTranscripts(data.transcripts || [])
         setSelectedMeeting(meetingName)
-        console.log('Loaded transcript for:', meetingName, data.transcripts?.length)
         
         if (transcriptService) {
           transcriptService.watchTranscript(meetingName)
@@ -218,20 +241,27 @@ export function Dashboard() {
   
   useEffect(() => {
     if (isRecording && roomName && transcriptService) {
-      console.log('Recording started, watching transcript file:', roomName)
+      setMeetingTitle(roomName)
+      setSelectedMeeting(roomName)
+      setTranscripts([])
+      transcriptService.watchTranscript(roomName)
+    } else if (!isRecording && roomName && transcriptService) {
       transcriptService.watchTranscript(roomName)
     }
   }, [isRecording, roomName, transcriptService])
 
   useEffect(() => {
     const loadAvailableTranscripts = async () => {
+      let controller: AbortController | null = null
+      let timeoutId: ReturnType<typeof setTimeout> | null = null
+      
       try {
-        console.log('Fetching transcripts list from:', `${HTTP_API_URL}/transcripts/list`)
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => {
-          controller.abort()
-          console.warn('Request timed out after 5 seconds')
-        }, 5000)
+        controller = new AbortController()
+        timeoutId = setTimeout(() => {
+          if (controller) {
+            controller.abort()
+          }
+        }, 10000)
         
         const response = await fetch(`${HTTP_API_URL}/transcripts/list`, {
           method: 'GET',
@@ -242,18 +272,28 @@ export function Dashboard() {
           signal: controller.signal,
         })
         
-        clearTimeout(timeoutId)
+        if (timeoutId) {
+          clearTimeout(timeoutId)
+          timeoutId = null
+        }
         
         if (response.ok) {
           const data = await response.json()
           setAvailableTranscripts(data.transcripts || [])
-          console.log('Loaded available transcripts:', data.transcripts)
           if (data.transcripts && data.transcripts.length > 0) {
             const mostRecent = data.transcripts[0].file_name
             setLoadingTranscripts(true)
+            
+            let transcriptController: AbortController | null = null
+            let transcriptTimeoutId: ReturnType<typeof setTimeout> | null = null
+            
             try {
-              const transcriptController = new AbortController()
-              const transcriptTimeoutId = setTimeout(() => transcriptController.abort(), 5000)
+              transcriptController = new AbortController()
+              transcriptTimeoutId = setTimeout(() => {
+                if (transcriptController) {
+                  transcriptController.abort()
+                }
+              }, 10000)
               
               const transcriptResponse = await fetch(`${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(mostRecent)}`, {
                 headers: {
@@ -263,7 +303,11 @@ export function Dashboard() {
                 signal: transcriptController.signal,
               })
               
-              clearTimeout(transcriptTimeoutId)
+              if (transcriptTimeoutId) {
+                clearTimeout(transcriptTimeoutId)
+                transcriptTimeoutId = null
+              }
+              
               if (transcriptResponse.ok) {
                 const transcriptData = await transcriptResponse.json()
                 setMeetingTitle(transcriptData.meeting_name || mostRecent)
@@ -273,10 +317,11 @@ export function Dashboard() {
                 console.error('Failed to load transcript:', transcriptResponse.status, await transcriptResponse.text())
               }
             } catch (err) {
-              console.error('Error loading most recent transcript:', err)
-              if (err instanceof Error && err.name === 'AbortError') {
-                console.warn('Transcript loading timed out, but page will still render')
-              } else {
+              if (transcriptTimeoutId) {
+                clearTimeout(transcriptTimeoutId)
+              }
+              
+              if (!(err instanceof Error && err.name === 'AbortError')) {
                 setError(`Failed to load transcript: ${err instanceof Error ? err.message : 'Unknown error'}`)
               }
             } finally {
@@ -286,7 +331,6 @@ export function Dashboard() {
             setLoadingTranscripts(false)
           }
         } else if (response.status === 404) {
-          console.warn('Transcripts list endpoint not found. The server may need to be restarted.')
           setError('API endpoint not found. Please restart the backend server to load the latest code.')
           setLoadingTranscripts(false)
         } else {
@@ -296,10 +340,11 @@ export function Dashboard() {
           setLoadingTranscripts(false)
         }
       } catch (err) {
-        console.error('Error loading transcripts list:', err)
-        if (err instanceof Error && err.name === 'AbortError') {
-          setError(`Request timed out. The API server at ${HTTP_API_URL} may not be responding.`)
-        } else {
+        if (timeoutId) {
+          clearTimeout(timeoutId)
+        }
+        
+        if (!(err instanceof Error && err.name === 'AbortError')) {
           setError(`Cannot connect to API server at ${HTTP_API_URL}. Make sure the backend server is running.`)
         }
         setLoadingTranscripts(false)
@@ -311,10 +356,9 @@ export function Dashboard() {
     loadAvailableTranscripts()
     
     const safetyTimeout = setTimeout(() => {
-      console.warn('Safety timeout: Showing page even though API call may still be pending')
       setInitialLoadComplete(true)
       setLoadingTranscripts(false)
-    }, 2000)
+    }, 3000)
     
     return () => {
       clearTimeout(safetyTimeout)
@@ -357,20 +401,43 @@ export function Dashboard() {
       await liveKitService.disconnect()
       setIsRecording(false)
       
+      // Wait a moment for the backend to finish processing and save the transcript
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      
       if (transcriptService && roomName) {
-        console.log('Stopping recording, requesting transcript for room:', roomName);
-        console.log('WebSocket connected status:', wsConnected);
+        setMeetingTitle(roomName)
+        setSelectedMeeting(roomName)
         
         if (!wsConnected) {
-          console.warn('WebSocket not connected, waiting before requesting transcript...');
           setTimeout(() => {
             if (transcriptService && roomName) {
               transcriptService.requestTranscript(roomName);
             }
-          }, 500);
+          }, 1000);
         } else {
           transcriptService.requestTranscript(roomName);
         }
+        
+        setTimeout(async () => {
+          try {
+            const response = await fetch(`${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(roomName)}`, {
+              headers: {
+                'Content-Type': 'application/json',
+                ...authService.getAuthHeaders(),
+              },
+            })
+            if (response.ok) {
+              const data = await response.json()
+              if (data.transcripts && data.transcripts.length > 0) {
+                setMeetingTitle(data.meeting_name || roomName)
+                setTranscripts(data.transcripts || [])
+                setSelectedMeeting(roomName)
+              }
+            }
+          } catch (err) {
+            // HTTP fallback failed, WebSocket should handle it
+          }
+        }, 2000)
       }
     } catch (err) {
       console.error('Failed to stop recording:', err)
@@ -729,8 +796,8 @@ export function Dashboard() {
           }}>
             <p style={{ color: '#666', fontStyle: 'italic', textAlign: 'center' }}>
             {isRecording 
-                ? 'Recording in progress... Transcript will appear here when you stop recording.' 
-                : 'No transcript yet. Start recording and then stop to see the transcript.'}
+                ? '🎙️ Recording in progress... Transcripts will appear here in real-time as you speak.' 
+                : 'No transcript yet. Start recording to see transcripts appear in real-time.'}
             </p>
           </div>
         ) : (

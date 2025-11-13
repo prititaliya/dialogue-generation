@@ -97,7 +97,7 @@ Expected: `Local: http://localhost:5173/`
 ```
 SPEECHMATICS_API_KEY=your_key
 OPENAI_API_KEY=your_key
-LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_URL=wss://voice-agent-dsp63yns.livekit.cloud
 LIVEKIT_API_KEY=your_key
 LIVEKIT_API_SECRET=your_secret
 ```
@@ -105,7 +105,7 @@ LIVEKIT_API_SECRET=your_secret
 ### Frontend (.env)
 ```
 VITE_API_URL=ws://localhost:8000
-VITE_LIVEKIT_URL=ws://localhost:7880
+VITE_LIVEKIT_URL=wss://voice-agent-dsp63yns.livekit.cloud
 ```
 
 ## 🎯 System Status

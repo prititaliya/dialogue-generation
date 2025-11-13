@@ -14,7 +14,8 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from livekit.plugins import speechmatics
 import asyncio
-from api_server import get_transcript_manager, update_transcript_incremental
+# Lazy imports to avoid blocking agent initialization
+# These will be imported only when needed
 
 # Import for handling microphone errors (agent uses room audio only)
 try:
@@ -48,8 +49,25 @@ transcripts: List[Tuple[str, str]] = []
 speaker_label_map: Dict[str, str] = {}
 next_speaker_num: int = 1
 
-# Get transcript manager for WebSocket broadcasting
-transcript_manager = get_transcript_manager()
+# Lazy getter for transcript manager to avoid blocking agent initialization
+_transcript_manager = None
+_update_transcript_incremental_fn = None
+
+def _get_transcript_manager():
+    """Lazy getter for transcript manager - imports only when needed"""
+    global _transcript_manager
+    if _transcript_manager is None:
+        from api_server import get_transcript_manager
+        _transcript_manager = get_transcript_manager()
+    return _transcript_manager
+
+def _get_update_transcript_incremental():
+    """Lazy getter for update_transcript_incremental - imports only when needed"""
+    global _update_transcript_incremental_fn
+    if _update_transcript_incremental_fn is None:
+        from api_server import update_transcript_incremental
+        _update_transcript_incremental_fn = update_transcript_incremental
+    return _update_transcript_incremental_fn
 
 
 # ------------------------------------------------------------
@@ -124,7 +142,7 @@ class sampingAgent(Agent):
                                     )
                                     speaker_label_map[spk] = response.speaker_name
                                     # Update transcript manager
-                                    transcript_manager.update_speaker_label(
+                                    _get_transcript_manager().update_speaker_label(
                                         spk, response.speaker_name
                                     )
 
@@ -228,7 +246,7 @@ class DiarizationAgent(Agent):
 
                         # Then send via WebSocket (this will use API server's transcript manager)
                         asyncio.create_task(
-                            transcript_manager.send_complete_transcript(
+                            _get_transcript_manager().send_complete_transcript(
                                 room_name, transcripts
                             )
                         )
@@ -276,8 +294,8 @@ class DiarizationAgent(Agent):
                                     updated_existing = True
                                 else:
                                     # Check if this exact text already exists in recent entries (prevent repeats)
-                                    # Check last 3 entries to catch duplicates
-                                    for entry in transcripts[-3:]:
+                                    # Check last 20 entries to catch duplicates (increased from 3)
+                                    for entry in transcripts[-20:]:
                                         entry_speaker, entry_text = entry
                                         if (
                                             entry_speaker == label
@@ -306,7 +324,7 @@ class DiarizationAgent(Agent):
 
                             # Update JSON file incrementally for final event
                             try:
-                                update_transcript_incremental(
+                                _get_update_transcript_incremental()(
                                     room_name, label, text_stripped, is_final=True
                                 )
                             except Exception as e:
@@ -314,10 +332,11 @@ class DiarizationAgent(Agent):
                                     f"❌ Error updating transcript incrementally: {e}"
                                 )
 
-                            # Update transcript manager's internal list (but don't broadcast)
-                            # This allows the API server to retrieve transcripts when requested
+                            # Update transcript manager's internal list
+                            # The update_transcript_incremental call above already broadcasts via WebSocket
+                            # This update is for the API server's internal state
                             asyncio.create_task(
-                                transcript_manager.update_transcripts(
+                                _get_transcript_manager().update_transcripts(
                                     label, text_stripped, is_final=True
                                 )
                             )
@@ -353,8 +372,8 @@ class DiarizationAgent(Agent):
                             except Exception:
                                 pass
 
-                            # Don't broadcast in real-time - accumulate transcripts instead
-                            # Transcripts will be sent when "stop recording" is detected or button is pressed
+                            # Real-time broadcast is handled by update_transcript_incremental
+                            # The file watcher will also pick up changes and send updates
 
                         else:
                             # Interim transcript - update JSON file in real-time as words come in
@@ -362,7 +381,7 @@ class DiarizationAgent(Agent):
 
                             # Update JSON file incrementally for interim event
                             try:
-                                update_transcript_incremental(
+                                _get_update_transcript_incremental()(
                                     room_name, label, text_stripped, is_final=False
                                 )
                             except Exception as e:
@@ -372,7 +391,7 @@ class DiarizationAgent(Agent):
 
                             # Update transcript manager's internal list for interim events
                             asyncio.create_task(
-                                transcript_manager.update_transcripts(
+                                _get_transcript_manager().update_transcripts(
                                     label, text_stripped, is_final=False
                                 )
                             )

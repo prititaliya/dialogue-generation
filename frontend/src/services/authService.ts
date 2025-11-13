@@ -58,23 +58,42 @@ class AuthService {
   }
 
   async login(username: string, password: string): Promise<AuthResponse> {
-    const response = await fetch(`${HTTP_API_URL}/auth/login`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ username, password }),
-    })
+    try {
+      const response = await fetch(`${HTTP_API_URL}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ username, password }),
+      })
 
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.detail || 'Login failed')
+      if (!response.ok) {
+        let errorMessage = 'Login failed'
+        try {
+          const error = await response.json()
+          errorMessage = error.detail || error.message || errorMessage
+        } catch {
+          // If response is not JSON, try to get text
+          try {
+            const text = await response.text()
+            errorMessage = text || errorMessage
+          } catch {
+            errorMessage = `Server error: ${response.status} ${response.statusText}`
+          }
+        }
+        throw new Error(errorMessage)
+      }
+
+      const data: AuthResponse = await response.json()
+      this.setToken(data.access_token)
+      this.setUser(data.user)
+      return data
+    } catch (error) {
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        throw new Error('Cannot connect to server. Please make sure the backend server is running at ' + HTTP_API_URL)
+      }
+      throw error
     }
-
-    const data: AuthResponse = await response.json()
-    this.setToken(data.access_token)
-    this.setUser(data.user)
-    return data
   }
 
   async getCurrentUser(): Promise<User | null> {
