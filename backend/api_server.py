@@ -2154,6 +2154,244 @@ async def stop_recording(
         )
 
 
+class UpdateTranscriptRequest(BaseModel):
+    transcripts: List[Dict[str, str]]
+
+
+@app.delete("/transcripts/{meeting_name}")
+async def delete_transcript(
+    meeting_name: str,
+    current_user = Depends(get_current_user)
+):
+    """
+    Delete a transcript - removes from vector DB and deletes JSON file.
+    Requires user ownership verification.
+    """
+    user_id = current_user.id
+    
+    # Normalize meeting_name: remove .json extension if present
+    normalized_meeting_name = meeting_name
+    if normalized_meeting_name.endswith('.json'):
+        normalized_meeting_name = normalized_meeting_name[:-5]  # Remove .json
+    
+    logger.info(f"🗑️  Delete request for meeting_name='{meeting_name}' (normalized: '{normalized_meeting_name}') by user_id={user_id}")
+    
+    # Verify user owns this meeting (try both with and without .json)
+    room_user_id = get_user_id_for_room(normalized_meeting_name) or get_user_id_for_room(meeting_name)
+    if room_user_id and room_user_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to delete this transcript"
+        )
+    
+    deleted_from_vector_db = False
+    deleted_from_file = False
+    deleted_keys = []
+    
+    # Try to delete from vector database
+    try:
+        from vector_db.vector_store import get_redis_client
+        
+        client = get_redis_client()
+        keys = client.keys("transcript:*")
+        
+        logger.info(f"🔍 Searching {len(keys)} transcript keys in vector DB for meeting_name='{normalized_meeting_name}'")
+        
+        for key in keys:
+            data = client.hgetall(key)
+            stored_meeting_name = data.get(b'meeting_name')
+            stored_user_id = data.get(b'user_id')
+            
+            if stored_meeting_name and stored_user_id:
+                stored_meeting_name_str = stored_meeting_name.decode('utf-8')
+                stored_user_id_str = int(stored_user_id.decode('utf-8'))
+                
+                # Compare both normalized names (with and without .json)
+                name_matches = (
+                    stored_meeting_name_str == normalized_meeting_name or
+                    stored_meeting_name_str == meeting_name or
+                    (stored_meeting_name_str.endswith('.json') and stored_meeting_name_str[:-5] == normalized_meeting_name)
+                )
+                
+                if name_matches and stored_user_id_str == user_id:
+                    # Found it - delete from Redis
+                    key_str = key.decode('utf-8')
+                    client.delete(key)
+                    deleted_keys.append(key_str)
+                    deleted_from_vector_db = True
+                    logger.info(f"🗑️  Deleted transcript '{stored_meeting_name_str}' (key: {key_str}) from vector DB")
+        
+        if deleted_keys:
+            logger.info(f"✅ Successfully deleted {len(deleted_keys)} transcript(s) from vector DB: {deleted_keys}")
+        else:
+            logger.warning(f"⚠️  No matching transcripts found in vector DB for meeting_name='{normalized_meeting_name}' (user_id={user_id})")
+            
+    except Exception as e:
+        logger.error(f"❌ Error deleting from vector DB: {e}", exc_info=True)
+    
+    # Try to delete JSON file if it exists (try both with and without .json)
+    for name_variant in [normalized_meeting_name, meeting_name]:
+        file_path = get_transcript_file_path(name_variant)
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                deleted_from_file = True
+                logger.info(f"🗑️  Deleted transcript file: {file_path}")
+                break
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete JSON file {file_path}: {e}")
+    
+    if deleted_from_vector_db or deleted_from_file:
+        return {
+            "status": "ok",
+            "message": "Transcript deleted successfully",
+            "meeting_name": normalized_meeting_name,
+            "deleted_from_vector_db": deleted_from_vector_db,
+            "deleted_from_file": deleted_from_file,
+            "deleted_keys": deleted_keys if deleted_from_vector_db else []
+        }
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Transcript '{normalized_meeting_name}' not found in vector DB or file system"
+        )
+
+
+@app.put("/transcripts/{meeting_name}")
+async def update_transcript(
+    meeting_name: str,
+    request: UpdateTranscriptRequest,
+    current_user = Depends(get_current_user)
+):
+    """
+    Update a transcript - modifies entries in vector DB and JSON file.
+    Requires user ownership verification.
+    """
+    user_id = current_user.id
+    
+    # Verify user owns this meeting
+    room_user_id = get_user_id_for_room(meeting_name)
+    if room_user_id and room_user_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to update this transcript"
+        )
+    
+    # Convert request transcripts to (speaker, text) tuples
+    transcript_entries = [
+        (entry.get("speaker", "Unknown"), entry.get("text", ""))
+        for entry in request.transcripts
+        if entry.get("text", "").strip()  # Only non-empty entries
+    ]
+    
+    if not transcript_entries:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot update transcript with empty entries"
+        )
+    
+    # Update in vector database
+    updated_in_vector_db = False
+    try:
+        from vector_db.vector_store import store_transcript, get_redis_client
+        from datetime import datetime
+        
+        client = get_redis_client()
+        keys = client.keys("transcript:*")
+        existing_meeting_id = None
+        
+        # Find existing transcript
+        for key in keys:
+            data = client.hgetall(key)
+            stored_meeting_name = data.get(b'meeting_name')
+            stored_user_id = data.get(b'user_id')
+            
+            if stored_meeting_name and stored_user_id:
+                stored_meeting_name_str = stored_meeting_name.decode('utf-8')
+                stored_user_id_str = int(stored_user_id.decode('utf-8'))
+                
+                if stored_meeting_name_str == meeting_name and stored_user_id_str == user_id:
+                    existing_meeting_id = key.decode('utf-8').replace('transcript:', '')
+                    break
+        
+        # Combine transcript entries into text
+        transcript_text_parts = []
+        speakers_set = set()
+        
+        for speaker, text in transcript_entries:
+            if text.strip():
+                transcript_text_parts.append(f"{speaker}: {text.strip()}")
+                speakers_set.add(speaker)
+        
+        transcript_text = "\n".join(transcript_text_parts)
+        speakers_list = sorted(list(speakers_set))
+        
+        # Generate meeting_id if not exists
+        timestamp = datetime.now().timestamp()
+        meeting_id = existing_meeting_id if existing_meeting_id else f"{user_id}_{meeting_name}_{int(timestamp)}"
+        
+        # Store/update in vector DB
+        stored_meeting_id = store_transcript(
+            user_id=user_id,
+            meeting_name=meeting_name,
+            transcript_text=transcript_text,
+            speakers=speakers_list,
+            timestamp=timestamp,
+            meeting_id=meeting_id,
+        )
+        
+        if stored_meeting_id:
+            updated_in_vector_db = True
+            logger.info(f"✅ Updated transcript '{meeting_name}' in vector DB")
+    except Exception as e:
+        logger.warning(f"⚠️  Error updating in vector DB: {e}")
+    
+    # Update JSON file if it exists
+    updated_in_file = False
+    file_path = get_transcript_file_path(meeting_name)
+    if file_path.exists():
+        try:
+            transcript_data = {
+                "meeting_name": meeting_name,
+                "transcripts": [
+                    {"speaker": speaker, "text": text, "is_final": True}
+                    for speaker, text in transcript_entries
+                ],
+                "total_entries": len(transcript_entries),
+            }
+            
+            # Add user_id to metadata
+            if user_id:
+                transcript_data["user_id"] = user_id
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(transcript_data, f, indent=2, ensure_ascii=False)
+            
+            updated_in_file = True
+            logger.info(f"✅ Updated transcript file: {file_path}")
+        except Exception as e:
+            logger.warning(f"⚠️  Error updating JSON file: {e}")
+    
+    if updated_in_vector_db or updated_in_file:
+        return {
+            "status": "ok",
+            "message": "Transcript updated successfully",
+            "meeting_name": meeting_name,
+            "total_entries": len(transcript_entries),
+            "updated_in_vector_db": updated_in_vector_db,
+            "updated_in_file": updated_in_file,
+            "transcripts": [
+                {"speaker": speaker, "text": text, "is_final": True}
+                for speaker, text in transcript_entries
+            ]
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update transcript in both vector DB and file"
+        )
+
+
 @app.post("/token")
 async def generate_token(request: TokenRequest, current_user = Depends(get_current_user)):
     """Generate a LiveKit access token for a room"""

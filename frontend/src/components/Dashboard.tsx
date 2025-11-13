@@ -39,6 +39,12 @@ export function Dashboard() {
   const isRecordingRef = useRef<boolean>(isRecording)
   const selectedMeetingRef = useRef<string | null>(selectedMeeting)
   
+  // CRUD operation states
+  const [deleteConfirm, setDeleteConfirm] = useState<{show: boolean, meetingName: string | null}>({show: false, meetingName: null})
+  const [editModal, setEditModal] = useState<{show: boolean, meetingName: string | null, transcripts: Transcript[]}>({show: false, meetingName: null, transcripts: []})
+  const [toasts, setToasts] = useState<Array<{id: number, message: string, type: 'success' | 'error' | 'info'}>>([])
+  const [searchQuery, setSearchQuery] = useState<string>('')
+  
   // Keep refs in sync with state
   useEffect(() => {
     roomNameRef.current = roomName
@@ -600,6 +606,117 @@ export function Dashboard() {
     navigate('/login')
   }
 
+  // Toast notification helper
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = Date.now()
+    setToasts(prev => [...prev, { id, message, type }])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 3000)
+  }
+
+  // Delete transcript handler
+  const handleDeleteTranscript = async (meetingName: string) => {
+    try {
+      const response = await fetch(`${HTTP_API_URL}/transcripts/${encodeURIComponent(meetingName)}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authService.getAuthHeaders(),
+        },
+      })
+
+      if (response.ok) {
+        showToast(`Transcript "${meetingName}" deleted successfully`, 'success')
+        setAvailableTranscripts(prev => prev.filter(t => t.meeting_name !== meetingName))
+        if (selectedMeeting === meetingName) {
+          setSelectedMeeting(null)
+          setTranscripts([])
+          setMeetingTitle(null)
+        }
+        setDeleteConfirm({ show: false, meetingName: null })
+        refreshTranscriptsList()
+      } else {
+        const errorData = await response.json().catch(() => ({ detail: 'Failed to delete transcript' }))
+        showToast(errorData.detail || 'Failed to delete transcript', 'error')
+      }
+    } catch (err) {
+      console.error('Error deleting transcript:', err)
+      showToast('Failed to delete transcript', 'error')
+    }
+  }
+
+  // Open edit modal
+  const handleEditTranscript = async (meetingName: string) => {
+    try {
+      const response = await fetch(`${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(meetingName)}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...authService.getAuthHeaders(),
+        },
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        setEditModal({
+          show: true,
+          meetingName: meetingName,
+          transcripts: data.transcripts || []
+        })
+      } else {
+        showToast('Failed to load transcript for editing', 'error')
+      }
+    } catch (err) {
+      console.error('Error loading transcript for edit:', err)
+      showToast('Failed to load transcript', 'error')
+    }
+  }
+
+  // Save edited transcript
+  const handleSaveEdit = async () => {
+    if (!editModal.meetingName) return
+
+    try {
+      const response = await fetch(`${HTTP_API_URL}/transcripts/${encodeURIComponent(editModal.meetingName)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authService.getAuthHeaders(),
+        },
+        body: JSON.stringify({
+          transcripts: editModal.transcripts.map(t => ({
+            speaker: t.speaker,
+            text: t.text
+          }))
+        })
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        showToast(`Transcript "${editModal.meetingName}" updated successfully`, 'success')
+        setEditModal({ show: false, meetingName: null, transcripts: [] })
+        
+        // Update local state if this is the currently selected meeting
+        if (selectedMeeting === editModal.meetingName) {
+          setTranscripts(data.transcripts || [])
+        }
+        
+        refreshTranscriptsList()
+      } else {
+        const errorData = await response.json().catch(() => ({ detail: 'Failed to update transcript' }))
+        showToast(errorData.detail || 'Failed to update transcript', 'error')
+      }
+    } catch (err) {
+      console.error('Error updating transcript:', err)
+      showToast('Failed to update transcript', 'error')
+    }
+  }
+
+  // Filter transcripts based on search query
+  const filteredTranscripts = availableTranscripts.filter(t => 
+    t.meeting_name.toLowerCase().includes(searchQuery.toLowerCase())
+  )
+
   if (!initialLoadComplete) {
     return (
       <div style={{ 
@@ -629,16 +746,27 @@ export function Dashboard() {
   return (
     <div style={{ 
       padding: '20px', 
-      fontFamily: 'Arial, sans-serif',
+      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       minHeight: '100vh',
-      background: '#fafafa'
+      background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%)',
+      backgroundAttachment: 'fixed'
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <h1 style={{ color: '#333', margin: 0 }}>Real-Time Transcription</h1>
+        <h1 style={{ 
+          margin: 0,
+          fontSize: '32px',
+          fontWeight: '800',
+          background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          backgroundClip: 'text'
+        }}>
+          Real-Time Transcription
+        </h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
           {user && (
-            <span style={{ color: '#666', fontSize: '14px' }}>
-              Welcome, <strong>{user.username}</strong>
+            <span style={{ color: 'rgba(241, 245, 249, 0.8)', fontSize: '14px' }}>
+              Welcome, <strong style={{ color: '#f1f5f9' }}>{user.username}</strong>
             </span>
           )}
           <button
@@ -844,84 +972,223 @@ export function Dashboard() {
       {availableTranscripts.length > 0 && (
         <div style={{ 
           marginTop: '20px',
-          padding: '15px',
-          background: 'white',
-          borderRadius: '5px',
-          border: '1px solid #ddd',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+          padding: '24px',
+          background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 50%, rgba(236, 72, 153, 0.1) 100%)',
+          backdropFilter: 'blur(16px)',
+          borderRadius: '16px',
+          border: '1px solid rgba(255, 255, 255, 0.2)',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)'
         }}>
-          <h3 style={{ marginTop: 0, marginBottom: '15px', fontSize: '18px', fontWeight: '600' }}>
-            📚 Available Transcripts ({availableTranscripts.length})
-          </h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+            <h3 style={{ 
+              margin: 0, 
+              fontSize: '24px', 
+              fontWeight: '700',
+              background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text'
+            }}>
+              📚 Available Transcripts ({filteredTranscripts.length})
+            </h3>
+            <input
+              type="text"
+              placeholder="🔍 Search transcripts..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                padding: '10px 16px',
+                background: 'rgba(255, 255, 255, 0.1)',
+                backdropFilter: 'blur(10px)',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                borderRadius: '12px',
+                color: '#f1f5f9',
+                fontSize: '14px',
+                width: '300px',
+                outline: 'none',
+                transition: 'all 0.3s ease'
+              }}
+              onFocus={(e) => {
+                e.target.style.background = 'rgba(255, 255, 255, 0.15)'
+                e.target.style.borderColor = 'rgba(99, 102, 241, 0.5)'
+              }}
+              onBlur={(e) => {
+                e.target.style.background = 'rgba(255, 255, 255, 0.1)'
+                e.target.style.borderColor = 'rgba(255, 255, 255, 0.2)'
+              }}
+            />
+            <style>{`
+              input::placeholder {
+                color: rgba(241, 245, 249, 0.5) !important;
+              }
+            `}</style>
+          </div>
           <div style={{ 
             display: 'grid', 
-            gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', 
-            gap: '10px' 
+            gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', 
+            gap: '16px' 
           }}>
-            {availableTranscripts.map((transcript) => (
-              <button
+            {filteredTranscripts.map((transcript) => (
+              <div
                 key={transcript.file_name}
-                onClick={() => loadTranscript(transcript.file_name)}
-                disabled={loadingTranscripts || transcript.isCurrent}
                 style={{
-                  padding: '12px',
-                  background: selectedMeeting === transcript.file_name ? '#007bff' : transcript.isCurrent ? '#fff5f5' : '#f8f9fa',
-                  color: selectedMeeting === transcript.file_name ? 'white' : transcript.isCurrent ? '#dc3545' : '#333',
-                  border: `2px solid ${selectedMeeting === transcript.file_name ? '#007bff' : transcript.isCurrent ? '#dc3545' : '#ddd'}`,
-                  borderRadius: '8px',
-                  cursor: loadingTranscripts || transcript.isCurrent ? 'not-allowed' : 'pointer',
-                  textAlign: 'left',
-                  transition: 'all 0.2s ease',
-                  opacity: loadingTranscripts ? 0.6 : 1,
-                  position: 'relative'
+                  padding: '20px',
+                  background: selectedMeeting === transcript.file_name 
+                    ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.3) 0%, rgba(139, 92, 246, 0.3) 100%)'
+                    : 'rgba(255, 255, 255, 0.1)',
+                  backdropFilter: 'blur(16px)',
+                  border: selectedMeeting === transcript.file_name
+                    ? '2px solid rgba(99, 102, 241, 0.6)'
+                    : '1px solid rgba(255, 255, 255, 0.2)',
+                  borderRadius: '16px',
+                  boxShadow: selectedMeeting === transcript.file_name
+                    ? '0 8px 32px rgba(99, 102, 241, 0.3)'
+                    : '0 4px 16px rgba(0, 0, 0, 0.1)',
+                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                  cursor: transcript.isCurrent ? 'not-allowed' : 'pointer',
+                  opacity: transcript.isCurrent ? 0.7 : 1,
+                  position: 'relative',
+                  overflow: 'hidden'
                 }}
                 onMouseEnter={(e) => {
-                  if (!loadingTranscripts && selectedMeeting !== transcript.file_name && !transcript.isCurrent) {
-                    e.currentTarget.style.background = '#e9ecef'
-                    e.currentTarget.style.borderColor = '#007bff'
+                  if (!transcript.isCurrent) {
+                    e.currentTarget.style.transform = 'translateY(-4px) scale(1.02)'
+                    e.currentTarget.style.boxShadow = '0 12px 40px rgba(99, 102, 241, 0.4)'
+                    e.currentTarget.style.borderColor = 'rgba(99, 102, 241, 0.5)'
                   }
                 }}
                 onMouseLeave={(e) => {
-                  if (!loadingTranscripts && selectedMeeting !== transcript.file_name) {
-                    e.currentTarget.style.background = transcript.isCurrent ? '#fff5f5' : '#f8f9fa'
-                    e.currentTarget.style.borderColor = transcript.isCurrent ? '#dc3545' : '#ddd'
+                  if (!transcript.isCurrent) {
+                    e.currentTarget.style.transform = 'translateY(0) scale(1)'
+                    e.currentTarget.style.boxShadow = selectedMeeting === transcript.file_name
+                      ? '0 8px 32px rgba(99, 102, 241, 0.3)'
+                      : '0 4px 16px rgba(0, 0, 0, 0.1)'
+                    e.currentTarget.style.borderColor = selectedMeeting === transcript.file_name
+                      ? 'rgba(99, 102, 241, 0.6)'
+                      : 'rgba(255, 255, 255, 0.2)'
+                  }
+                }}
+                onClick={() => {
+                  if (!transcript.isCurrent && !loadingTranscripts) {
+                    loadTranscript(transcript.file_name)
                   }
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                  <div style={{ fontWeight: '600' }}>
-                    {transcript.meeting_name}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                      <div style={{ 
+                        fontWeight: '700', 
+                        fontSize: '16px',
+                        color: '#f1f5f9'
+                      }}>
+                        {transcript.meeting_name}
+                      </div>
+                      {transcript.isCurrent && (
+                        <span style={{
+                          fontSize: '10px',
+                          background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                          color: 'white',
+                          padding: '4px 8px',
+                          borderRadius: '6px',
+                          fontWeight: '600',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          boxShadow: '0 2px 8px rgba(239, 68, 68, 0.4)'
+                        }}>
+                          <span style={{
+                            width: '6px',
+                            height: '6px',
+                            borderRadius: '50%',
+                            backgroundColor: 'white',
+                            animation: 'pulse 1.5s infinite'
+                          }} />
+                          Recording
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: '13px', color: 'rgba(241, 245, 249, 0.8)', marginBottom: '4px' }}>
+                      {transcript.total_entries} {transcript.total_entries === 1 ? 'entry' : 'entries'}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'rgba(241, 245, 249, 0.6)' }}>
+                      {new Date(transcript.last_modified * 1000).toLocaleDateString()}
+                    </div>
                   </div>
-                  {transcript.isCurrent && (
-                    <span style={{
-                      fontSize: '10px',
-                      backgroundColor: '#dc3545',
-                      color: 'white',
-                      padding: '2px 6px',
-                      borderRadius: '3px',
-                      fontWeight: '600',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '4px'
-                    }}>
-                      <span style={{
-                        width: '6px',
-                        height: '6px',
-                        borderRadius: '50%',
-                        backgroundColor: 'white',
-                        animation: 'pulse 1.5s infinite'
-                      }} />
-                      Recording
-                    </span>
-                  )}
                 </div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>
-                  {transcript.total_entries} {transcript.total_entries === 1 ? 'entry' : 'entries'}
-                </div>
-                <div style={{ fontSize: '11px', opacity: 0.6, marginTop: '4px' }}>
-                  {new Date(transcript.last_modified * 1000).toLocaleDateString()}
-                </div>
-              </button>
+                
+                {/* Action Buttons */}
+                {!transcript.isCurrent && (
+                  <div style={{ 
+                    display: 'flex', 
+                    gap: '8px', 
+                    marginTop: '16px',
+                    paddingTop: '16px',
+                    borderTop: '1px solid rgba(255, 255, 255, 0.1)'
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      onClick={() => handleEditTranscript(transcript.meeting_name)}
+                      style={{
+                        flex: 1,
+                        padding: '8px 12px',
+                        background: 'rgba(99, 102, 241, 0.2)',
+                        border: '1px solid rgba(99, 102, 241, 0.4)',
+                        borderRadius: '8px',
+                        color: '#a5b4fc',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: '600',
+                        transition: 'all 0.2s ease',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(99, 102, 241, 0.3)'
+                        e.currentTarget.style.transform = 'scale(1.05)'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(99, 102, 241, 0.2)'
+                        e.currentTarget.style.transform = 'scale(1)'
+                      }}
+                    >
+                      ✏️ Edit
+                    </button>
+                    <button
+                      onClick={() => setDeleteConfirm({ show: true, meetingName: transcript.meeting_name })}
+                      style={{
+                        flex: 1,
+                        padding: '8px 12px',
+                        background: 'rgba(239, 68, 68, 0.2)',
+                        border: '1px solid rgba(239, 68, 68, 0.4)',
+                        borderRadius: '8px',
+                        color: '#fca5a5',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: '600',
+                        transition: 'all 0.2s ease',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.3)'
+                        e.currentTarget.style.transform = 'scale(1.05)'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)'
+                        e.currentTarget.style.transform = 'scale(1)'
+                      }}
+                    >
+                      🗑️ Delete
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         </div>
@@ -1237,10 +1504,352 @@ export function Dashboard() {
         )}
       </div>
 
+      {/* Delete Confirmation Modal */}
+      {deleteConfirm.show && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.7)',
+            backdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            animation: 'fadeIn 0.2s ease'
+          }}
+          onClick={() => setDeleteConfirm({ show: false, meetingName: null })}
+        >
+          <div
+            style={{
+              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
+              backdropFilter: 'blur(20px)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: '20px',
+              padding: '32px',
+              maxWidth: '500px',
+              width: '90%',
+              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)',
+              animation: 'slideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: '0 0 16px 0', fontSize: '24px', fontWeight: '700', color: '#f1f5f9' }}>
+              ⚠️ Delete Transcript?
+            </h3>
+            <p style={{ margin: '0 0 24px 0', color: 'rgba(241, 245, 249, 0.8)', lineHeight: '1.6' }}>
+              Are you sure you want to delete <strong style={{ color: '#f1f5f9' }}>"{deleteConfirm.meetingName}"</strong>? 
+              This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setDeleteConfirm({ show: false, meetingName: null })}
+                style={{
+                  padding: '10px 20px',
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  borderRadius: '10px',
+                  color: '#f1f5f9',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.15)'
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteConfirm.meetingName && handleDeleteTranscript(deleteConfirm.meetingName)}
+                style={{
+                  padding: '10px 20px',
+                  background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                  border: 'none',
+                  borderRadius: '10px',
+                  color: 'white',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  transition: 'all 0.2s ease',
+                  boxShadow: '0 4px 12px rgba(239, 68, 68, 0.4)'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'scale(1.05)'
+                  e.currentTarget.style.boxShadow = '0 6px 16px rgba(239, 68, 68, 0.5)'
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'scale(1)'
+                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(239, 68, 68, 0.4)'
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {editModal.show && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.7)',
+            backdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '20px',
+            overflow: 'auto',
+            animation: 'fadeIn 0.2s ease'
+          }}
+          onClick={() => setEditModal({ show: false, meetingName: null, transcripts: [] })}
+        >
+          <div
+            style={{
+              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
+              backdropFilter: 'blur(20px)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: '20px',
+              padding: '32px',
+              maxWidth: '900px',
+              width: '100%',
+              maxHeight: '90vh',
+              overflow: 'auto',
+              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)',
+              animation: 'slideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ 
+              margin: '0 0 24px 0', 
+              fontSize: '28px', 
+              fontWeight: '700',
+              background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text'
+            }}>
+              ✏️ Edit Transcript: {editModal.meetingName}
+            </h3>
+            
+            <div style={{ marginBottom: '24px', maxHeight: '60vh', overflowY: 'auto' }}>
+              {editModal.transcripts.map((entry, index) => (
+                <div
+                  key={index}
+                  style={{
+                    marginBottom: '16px',
+                    padding: '16px',
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(255, 255, 255, 0.1)'
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
+                    <input
+                      type="text"
+                      value={entry.speaker || ''}
+                      onChange={(e) => {
+                        const updated = [...editModal.transcripts]
+                        updated[index] = { ...updated[index], speaker: e.target.value }
+                        setEditModal({ ...editModal, transcripts: updated })
+                      }}
+                      placeholder="Speaker name"
+                      style={{
+                        flex: '0 0 150px',
+                        padding: '10px 12px',
+                        background: 'rgba(255, 255, 255, 0.1)',
+                        border: '1px solid rgba(255, 255, 255, 0.2)',
+                        borderRadius: '8px',
+                        color: '#f1f5f9',
+                        fontSize: '14px',
+                        outline: 'none'
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        const updated = editModal.transcripts.filter((_, i) => i !== index)
+                        setEditModal({ ...editModal, transcripts: updated })
+                      }}
+                      style={{
+                        padding: '10px 16px',
+                        background: 'rgba(239, 68, 68, 0.2)',
+                        border: '1px solid rgba(239, 68, 68, 0.4)',
+                        borderRadius: '8px',
+                        color: '#fca5a5',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        fontWeight: '600'
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <textarea
+                    value={entry.text || ''}
+                    onChange={(e) => {
+                      const updated = [...editModal.transcripts]
+                      updated[index] = { ...updated[index], text: e.target.value }
+                      setEditModal({ ...editModal, transcripts: updated })
+                    }}
+                    placeholder="Transcript text..."
+                    style={{
+                      width: '100%',
+                      minHeight: '80px',
+                      padding: '12px',
+                      background: 'rgba(255, 255, 255, 0.1)',
+                      border: '1px solid rgba(255, 255, 255, 0.2)',
+                      borderRadius: '8px',
+                      color: '#f1f5f9',
+                      fontSize: '14px',
+                      fontFamily: 'inherit',
+                      resize: 'vertical',
+                      outline: 'none'
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'space-between' }}>
+              <button
+                onClick={() => {
+                  setEditModal({
+                    ...editModal,
+                    transcripts: [...editModal.transcripts, { speaker: '', text: '', is_final: true }]
+                  })
+                }}
+                style={{
+                  padding: '10px 20px',
+                  background: 'rgba(99, 102, 241, 0.2)',
+                  border: '1px solid rgba(99, 102, 241, 0.4)',
+                  borderRadius: '10px',
+                  color: '#a5b4fc',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: '600'
+                }}
+              >
+                + Add Entry
+              </button>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button
+                  onClick={() => setEditModal({ show: false, meetingName: null, transcripts: [] })}
+                  style={{
+                    padding: '10px 20px',
+                    background: 'rgba(255, 255, 255, 0.1)',
+                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                    borderRadius: '10px',
+                    color: '#f1f5f9',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '600'
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveEdit}
+                  style={{
+                    padding: '10px 20px',
+                    background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                    border: 'none',
+                    borderRadius: '10px',
+                    color: 'white',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    boxShadow: '0 4px 12px rgba(99, 102, 241, 0.4)'
+                  }}
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notifications */}
+      <div
+        style={{
+          position: 'fixed',
+          top: '20px',
+          right: '20px',
+          zIndex: 2000,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px'
+        }}
+      >
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            style={{
+              padding: '16px 20px',
+              background: toast.type === 'success' 
+                ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.9) 0%, rgba(5, 150, 105, 0.9) 100%)'
+                : toast.type === 'error'
+                ? 'linear-gradient(135deg, rgba(239, 68, 68, 0.9) 0%, rgba(220, 38, 38, 0.9) 100%)'
+                : 'linear-gradient(135deg, rgba(99, 102, 241, 0.9) 0%, rgba(139, 92, 246, 0.9) 100%)',
+              backdropFilter: 'blur(16px)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: '12px',
+              color: 'white',
+              fontSize: '14px',
+              fontWeight: '600',
+              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.3)',
+              animation: 'slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              minWidth: '300px',
+              maxWidth: '400px'
+            }}
+          >
+            {toast.message}
+          </div>
+        ))}
+      </div>
+
       <style>{`
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.5; }
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes slideUp {
+          from { 
+            opacity: 0;
+            transform: translateY(20px);
+          }
+          to { 
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        @keyframes slideInRight {
+          from {
+            opacity: 0;
+            transform: translateX(100%);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0);
+          }
         }
       `}</style>
     </div>
