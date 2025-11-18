@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/Users/jatin/Desktop/dialogue-generation/backend/main.py", line 17, in <module>
+    from api_server import get_transcript_manager, update_transcript_incremental
+  File "/Users/jatin/Desktop/dialogue-generation/backend/api_server.py", line 1498
+    @app.post("/transcripts/cleanup-duplicates")
+SyntaxError: expected 'except' or 'finally' block

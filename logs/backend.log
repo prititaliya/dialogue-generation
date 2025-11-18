@@ -1,0 +1,11 @@
+Exception in thread Thread-1 (run_api_server):
+Traceback (most recent call last):
+  File "/opt/anaconda3/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+    self.run()
+  File "/opt/anaconda3/lib/python3.12/threading.py", line 1010, in run
+    self._target(*self._args, **self._kwargs)
+  File "/Users/jatin/Desktop/dialogue-generation/backend/start_server.py", line 78, in run_api_server
+    from api_server import app
+  File "/Users/jatin/Desktop/dialogue-generation/backend/api_server.py", line 1498
+    @app.post("/transcripts/cleanup-duplicates")
+SyntaxError: expected 'except' or 'finally' block

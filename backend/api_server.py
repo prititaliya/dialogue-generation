@@ -9,6 +9,7 @@ import logging
 from typing import Set, Dict, List, Tuple, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -1280,6 +1281,149 @@ async def generate_token(request: TokenRequest, current_user = Depends(get_curre
     except Exception as e:
         logger.error(f"Error generating token: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_transcript_text_for_meeting(meeting_name: str, user_id: int) -> str:
+    """Get transcript text from meeting name for a specific user"""
+    try:
+        import redis
+        
+        # Try to get from Redis first
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                client = redis.from_url(redis_url, decode_responses=False)
+                keys = client.keys("transcript:*")
+                
+                for key in keys:
+                    data = client.hgetall(key)
+                    stored_meeting_name = data.get(b'meeting_name')
+                    stored_user_id = data.get(b'user_id')
+                    
+                    if stored_meeting_name and stored_user_id:
+                        stored_meeting_name_str = stored_meeting_name.decode('utf-8')
+                        stored_user_id_str = int(stored_user_id.decode('utf-8'))
+                        
+                        if stored_meeting_name_str == meeting_name and stored_user_id_str == user_id:
+                            return data.get(b'transcript_text', b'').decode('utf-8')
+            except Exception as redis_error:
+                logger.warning(f"Redis lookup failed: {redis_error}, falling back to JSON file")
+        
+        # Fall back to JSON file
+        transcript_data = load_transcript_from_file(meeting_name)
+        if transcript_data and transcript_data.get("transcripts"):
+            # Convert transcript entries to text format
+            transcript_text = ""
+            for entry in transcript_data["transcripts"]:
+                speaker = entry.get("speaker", "Unknown")
+                text = entry.get("text", "")
+                if text:
+                    transcript_text += f"{speaker}: {text}\n"
+            return transcript_text.strip()
+        
+        return ""
+    except Exception as e:
+        logger.error(f"Error getting transcript text: {e}")
+        return ""
+
+
+class SummaryRequest(BaseModel):
+    meeting_name: str
+
+
+class ChatRequest(BaseModel):
+    meeting_name: str
+    question: str
+    chat_history: Optional[List[Dict[str, str]]] = []
+
+
+@app.post("/chatbot/summary")
+async def generate_transcript_summary(
+    request: SummaryRequest,
+    current_user = Depends(get_current_user)
+):
+    """Generate summary for a transcript"""
+    try:
+        from chatbot import generate_summary
+        
+        transcript_text = get_transcript_text_for_meeting(request.meeting_name, current_user.id)
+        
+        if not transcript_text:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Transcript not found for meeting: {request.meeting_name}"
+            )
+        
+        summary = await generate_summary(transcript_text)
+        
+        return {
+            "meeting_name": request.meeting_name,
+            "summary": summary
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
+
+
+@app.post("/chatbot/chat")
+async def chat_with_transcript(
+    request: ChatRequest,
+    current_user = Depends(get_current_user)
+):
+    """Chat with transcript using streaming"""
+    try:
+        from chatbot import stream_chat_response, generate_summary
+        from langchain_core.messages import HumanMessage, AIMessage
+        
+        transcript_text = get_transcript_text_for_meeting(request.meeting_name, current_user.id)
+        
+        if not transcript_text:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Transcript not found for meeting: {request.meeting_name}"
+            )
+        
+        # Convert chat_history from dict format to BaseMessage format
+        chat_history = []
+        for msg in request.chat_history or []:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                chat_history.append(HumanMessage(content=content))
+            elif role == "assistant":
+                chat_history.append(AIMessage(content=content))
+        
+        # Generate summary if not already provided (we'll generate it on first request)
+        # For now, we'll generate it each time - could be optimized to cache
+        summary = await generate_summary(transcript_text)
+        
+        async def generate():
+            async for chunk in stream_chat_response(
+                transcript_text,
+                summary,
+                chat_history,
+                request.question,
+                meeting_name=request.meeting_name
+            ):
+                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            yield "data: [DONE]\n\n"
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in chat: {e}")
+        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
 
 
 @app.websocket("/ws/transcripts")

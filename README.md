@@ -36,7 +36,7 @@ Make sure you have:
    ```bash
    SPEECHMATICS_API_KEY=your_speechmatics_api_key_here
    OPENAI_API_KEY=your_openai_api_key_here
-   LIVEKIT_URL=ws://localhost:7880
+   LIVEKIT_URL=wss://voice-agent-dsp63yns.livekit.cloud
    LIVEKIT_API_KEY=your_livekit_api_key
    LIVEKIT_API_SECRET=your_livekit_api_secret
    ```
@@ -56,7 +56,7 @@ Make sure you have:
 3. **Create `.env` file in the `frontend` directory:**
    ```bash
    VITE_API_URL=ws://localhost:8000
-   VITE_LIVEKIT_URL=ws://localhost:7880
+   VITE_LIVEKIT_URL=wss://voice-agent-dsp63yns.livekit.cloud
    ```
 
 ### Step 4: Start All Services
@@ -225,14 +225,14 @@ Once all services are running and you've opened the website:
 
 - `SPEECHMATICS_API_KEY`: Required - Speechmatics API key
 - `OPENAI_API_KEY`: Required - OpenAI API key
-- `LIVEKIT_URL`: LiveKit server URL (default: `ws://localhost:7880`)
+- `LIVEKIT_URL`: LiveKit server URL (default: `wss://voice-agent-dsp63yns.livekit.cloud`)
 - `LIVEKIT_API_KEY`: LiveKit API key
 - `LIVEKIT_API_SECRET`: LiveKit API secret
 
 ### Frontend Environment Variables
 
 - `VITE_API_URL`: Backend WebSocket URL (default: `ws://localhost:8000`)
-- `VITE_LIVEKIT_URL`: LiveKit server URL (default: `ws://localhost:7880`)
+- `VITE_LIVEKIT_URL`: LiveKit server URL (default: `wss://voice-agent-dsp63yns.livekit.cloud`)
 
 ## Troubleshooting
 

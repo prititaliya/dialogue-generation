@@ -1,4 +1,5 @@
 import type { Transcript, TranscriptMessage } from '../types';
+import { authService } from './authService';
 
 export class TranscriptService {
   private ws: WebSocket | null = null;
@@ -29,12 +30,13 @@ export class TranscriptService {
     }
     this.listeners.add(onTranscript);
 
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
       return;
     }
 
-    if (this.ws?.readyState === WebSocket.CONNECTING) {
-      return;
+    // If there's a closed/closing WebSocket, clean it up first
+    if (this.ws && (this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING)) {
+      this.ws = null;
     }
 
     this.connectWebSocket();
@@ -47,7 +49,17 @@ export class TranscriptService {
 
   private connectWebSocket() {
     try {
-      const wsUrl = `${this.apiUrl}/ws/transcripts`;
+      if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
+        return;
+      }
+      
+      const token = authService.getToken();
+      if (!token) {
+        console.error('Cannot connect to WebSocket: No authentication token. Please log in.');
+        return;
+      }
+      
+      const wsUrl = `${this.apiUrl}/ws/transcripts?token=${encodeURIComponent(token)}`;
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
@@ -65,6 +77,11 @@ export class TranscriptService {
       this.ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as TranscriptMessage;
+          console.log('📨 WebSocket message received:', {
+            type: message.type,
+            meeting_name: message.meeting_name,
+            timestamp: new Date().toLocaleTimeString()
+          });
           
           if (message.type === 'transcript') {
             if (message.speaker && message.text !== undefined) {
@@ -89,37 +106,24 @@ export class TranscriptService {
               this.onInitialTranscripts(message.transcripts);
             }
           } else if (message.type === 'complete_transcript') {
-            // Handle complete transcript with meeting title
-            console.log('Received complete_transcript:', {
-              meeting_title: message.meeting_title,
-              transcript_count: message.transcripts?.length || 0
-            });
             if (this.onCompleteTranscript && message.transcripts && message.meeting_title) {
               try {
                 this.onCompleteTranscript(message.meeting_title, message.transcripts);
-                console.log('Successfully processed complete transcript');
               } catch (err) {
                 console.error('Error in complete transcript callback:', err);
               }
-            } else {
-              console.warn('Missing data in complete_transcript message:', {
-                hasCallback: !!this.onCompleteTranscript,
-                hasTranscripts: !!message.transcripts,
-                hasTitle: !!message.meeting_title
-              });
             }
           } else if (message.type === 'transcript_new' || message.type === 'transcript_update') {
-            // Handle real-time file updates
-            console.log('Received file-based transcript update:', {
-              type: message.type,
+            console.log(`📡 WebSocket: ${message.type} message received`, {
               meeting_name: message.meeting_name,
               transcript_count: message.transcripts?.length || 0,
-              is_update: message.is_update
+              timestamp: new Date().toLocaleTimeString()
             });
             
             if (message.transcripts && message.transcripts.length > 0) {
-              // Convert to Transcript format and notify listeners
-              message.transcripts.forEach((transcriptData: any) => {
+              const transcripts = message.transcripts;
+              
+              transcripts.forEach((transcriptData: any, index: number) => {
                 const transcript = {
                   speaker: transcriptData.speaker,
                   text: transcriptData.text,
@@ -127,14 +131,25 @@ export class TranscriptService {
                   timestamp: Date.now(),
                 } as Transcript;
                 
-                this.listeners.forEach((listener) => {
+                console.log(`  📦 Transcript ${index + 1}/${transcripts.length}:`, {
+                  speaker: transcript.speaker,
+                  text: transcript.text?.substring(0, 100),
+                  is_final: transcript.is_final,
+                  meeting: message.meeting_name
+                });
+                
+                const listenersArray = Array.from(this.listeners);
+                listenersArray.forEach((listener, listenerIndex) => {
                   try {
+                    console.log(`    → Calling listener ${listenerIndex + 1} with transcript`);
                     listener(transcript, message.meeting_name);
                   } catch (err) {
-                    console.error('Error in transcript listener:', err);
+                    console.error(`    ❌ Error in transcript listener ${listenerIndex + 1}:`, err);
                   }
                 });
               });
+            } else {
+              console.warn(`⚠️ WebSocket: ${message.type} message received but no transcripts in payload`);
             }
           }
         } catch (error) {
@@ -156,10 +171,16 @@ export class TranscriptService {
           return;
         }
         
-        // Only reconnect if it wasn't a normal closure and we haven't exceeded max attempts
+        // Handle authentication errors (1008 = Policy Violation, used for auth failures)
+        if (event.code === 1008) {
+          console.error('❌ WebSocket authentication failed. Please log in again.');
+          // Clear invalid token and prevent reconnection
+          authService.logout();
+          return;
+        }
+        
         if (event.code !== 1000 && event.code !== 1001 && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
-          console.log(`Reconnecting... (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
           setTimeout(() => this.connectWebSocket(), this.reconnectDelay);
         } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
           console.error('Max reconnection attempts reached. Please refresh the page.');
@@ -171,37 +192,24 @@ export class TranscriptService {
   }
 
   requestTranscript(roomName: string) {
-    console.log('Requesting transcript for room:', roomName);
-    console.log('WebSocket state:', this.ws ? this.ws.readyState : 'null');
-    
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
-        const message = {
+        this.ws.send(JSON.stringify({
           type: 'request_transcript',
           room_name: roomName
-        };
-        console.log('Sending request_transcript message:', message);
-        this.ws.send(JSON.stringify(message));
+        }));
       } catch (error) {
         console.error('Error requesting transcript:', error);
       }
     } else {
-      console.warn('WebSocket is not connected. Current state:', this.ws?.readyState);
-      // Try to reconnect if not connected
       if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
-        console.log('Attempting to reconnect WebSocket...');
         this.connectWebSocket();
-        // Wait a bit for connection, then retry
         setTimeout(() => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            const message = {
+            this.ws.send(JSON.stringify({
               type: 'request_transcript',
               room_name: roomName
-            };
-            console.log('Retrying request_transcript after reconnect:', message);
-            this.ws.send(JSON.stringify(message));
-          } else {
-            console.error('Failed to reconnect WebSocket. Please refresh the page.');
+            }));
           }
         }, 1000);
       }
@@ -209,38 +217,26 @@ export class TranscriptService {
   }
 
   watchTranscript(meetingName: string) {
-    console.log('Requesting to watch transcript file:', meetingName);
-    
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
-        const message = {
+        this.ws.send(JSON.stringify({
           type: 'watch_transcript',
           meeting_name: meetingName,
-          room_name: meetingName // Support both field names
-        };
-        console.log('Sending watch_transcript message:', message);
-        this.ws.send(JSON.stringify(message));
+          room_name: meetingName
+        }));
       } catch (error) {
         console.error('Error requesting to watch transcript:', error);
       }
     } else {
-      console.warn('WebSocket is not connected. Current state:', this.ws?.readyState);
-      // Try to reconnect if not connected
       if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
-        console.log('Attempting to reconnect WebSocket...');
         this.connectWebSocket();
-        // Wait a bit for connection, then retry
         setTimeout(() => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            const message = {
+            this.ws.send(JSON.stringify({
               type: 'watch_transcript',
               meeting_name: meetingName,
               room_name: meetingName
-            };
-            console.log('Retrying watch_transcript after reconnect:', message);
-            this.ws.send(JSON.stringify(message));
-          } else {
-            console.error('Failed to reconnect WebSocket. Please refresh the page.');
+            }));
           }
         }, 1000);
       }
@@ -248,17 +244,13 @@ export class TranscriptService {
   }
 
   unwatchTranscript(meetingName: string) {
-    console.log('Requesting to stop watching transcript file:', meetingName);
-    
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
-        const message = {
+        this.ws.send(JSON.stringify({
           type: 'unwatch_transcript',
           meeting_name: meetingName,
           room_name: meetingName
-        };
-        console.log('Sending unwatch_transcript message:', message);
-        this.ws.send(JSON.stringify(message));
+        }));
       } catch (error) {
         console.error('Error requesting to unwatch transcript:', error);
       }
@@ -272,22 +264,35 @@ export class TranscriptService {
       this.ws = null; // Clear reference first to prevent race conditions
       
       try {
-        // Remove event handlers first to prevent any callbacks from firing
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.onopen = null;
-        ws.onmessage = null;
-        
         // Only close if the WebSocket is in a state that allows closing
         const readyState = ws.readyState;
-        if (readyState === WebSocket.OPEN) {
+        
+        // If CONNECTING, wait a bit for it to either open or fail before closing
+        if (readyState === WebSocket.CONNECTING) {
+          // Set a timeout to close after a short delay if still connecting
+          setTimeout(() => {
+            try {
+              if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'Intentional disconnect');
+              }
+            } catch (err) {
+              // Ignore errors
+            }
+          }, 100);
+        } else if (readyState === WebSocket.OPEN) {
+          // Remove event handlers first to prevent any callbacks from firing
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.onopen = null;
+          ws.onmessage = null;
           ws.close(1000, 'Intentional disconnect');
-        } else if (readyState === WebSocket.CONNECTING) {
-          // If still connecting, just close without waiting
-          // The browser will handle the cleanup
-          ws.close();
+        } else if (readyState === WebSocket.CLOSING || readyState === WebSocket.CLOSED) {
+          // Already closing or closed, just remove handlers
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.onopen = null;
+          ws.onmessage = null;
         }
-        // If CLOSING or CLOSED, do nothing
       } catch (err) {
         // Ignore errors when closing - the WebSocket might already be closed or in an invalid state
         // This is expected in React Strict Mode during development

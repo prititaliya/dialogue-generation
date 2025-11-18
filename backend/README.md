@@ -58,9 +58,7 @@ This system uses LiveKit agents to:
 ### Optional Configuration
 
 You can customize the Speechmatics STT settings in `main.py`:
-- `max_speakers`: Maximum number of speakers to detect
-- `diarization_sensitivity`: Sensitivity of speaker detection (0.0-1.0)
-- `prefer_current_speaker`: Prefer the current active speaker
+- `enable_diarization`: Enable speaker diarization (default: True)
 - `language`: Language code (default: "en")
 
 ## Usage
