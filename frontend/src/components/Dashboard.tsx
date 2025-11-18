@@ -6,6 +6,7 @@ import { LiveKitService } from '../services/livekit'
 import { getLiveKitToken } from '../services/tokenService'
 import { authService } from '../services/authService'
 import type { User } from '../services/authService'
+import { chatbotService, type ChatMessage } from '../services/chatbotService'
 
 const WS_API_URL = import.meta.env.VITE_API_URL || 'ws://localhost:8000'
 const HTTP_API_URL = import.meta.env.VITE_HTTP_API_URL || import.meta.env.VITE_API_URL?.replace('ws://', 'http://').replace('wss://', 'https://') || 'http://localhost:8000'
@@ -44,6 +45,16 @@ export function Dashboard() {
   const [editModal, setEditModal] = useState<{show: boolean, meetingName: string | null, transcripts: Transcript[]}>({show: false, meetingName: null, transcripts: []})
   const [toasts, setToasts] = useState<Array<{id: number, message: string, type: 'success' | 'error' | 'info'}>>([])
   const [searchQuery, setSearchQuery] = useState<string>('')
+  
+  // Chatbot and Summary states
+  const [summary, setSummary] = useState<string>('')
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [currentQuestion, setCurrentQuestion] = useState<string>('')
+  const [isStreaming, setIsStreaming] = useState(false)
+  const chatEndRef = useRef<HTMLDivElement>(null)
+  const chatInputRef = useRef<HTMLInputElement>(null)
+  const chatMessagesContainerRef = useRef<HTMLDivElement>(null)
   
   // Keep refs in sync with state
   useEffect(() => {
@@ -225,6 +236,25 @@ export function Dashboard() {
       }, 100)
     }
   }, [realtimeUpdates])
+
+  // Scroll chat container to bottom when messages change (without affecting page scroll)
+  useEffect(() => {
+    if (chatMessages.length > 0 && chatMessagesContainerRef.current) {
+      setTimeout(() => {
+        const container = chatMessagesContainerRef.current
+        if (container) {
+          container.scrollTop = container.scrollHeight
+        }
+      }, 50)
+    }
+  }, [chatMessages])
+
+  // Clear summary and chat when switching meetings
+  useEffect(() => {
+    setSummary('')
+    setChatMessages([])
+    setCurrentQuestion('')
+  }, [selectedMeeting])
 
   // Update displayText when transcripts change (for BOTH recording and watching)
   useEffect(() => {
@@ -1268,6 +1298,293 @@ export function Dashboard() {
               </div>
             )}
             <div ref={transcriptEndRef} style={{ height: '1px' }} />
+          </div>
+        </div>
+      )}
+
+      {/* Summary and Chatbot Section */}
+      {selectedMeeting && !isRecording && (
+        <div style={{ 
+          marginTop: '20px',
+          padding: '20px',
+          background: 'white',
+          borderRadius: '5px',
+          border: '1px solid #ddd',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }}>
+          {/* Summary Section */}
+          <div style={{ marginBottom: '30px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+              <h3 style={{ 
+                margin: 0,
+                fontSize: '20px',
+                fontWeight: '600',
+                color: '#333'
+              }}>
+                📝 Transcript Summary
+              </h3>
+              <button
+                onClick={async () => {
+                  if (!selectedMeeting) return
+                  setIsGeneratingSummary(true)
+                  setError(null)
+                  try {
+                    const result = await chatbotService.generateSummary(selectedMeeting)
+                    setSummary(result.summary)
+                  } catch (err) {
+                    console.error('Error generating summary:', err)
+                    setError(err instanceof Error ? err.message : 'Failed to generate summary')
+                  } finally {
+                    setIsGeneratingSummary(false)
+                  }
+                }}
+                disabled={isGeneratingSummary}
+                style={{
+                  padding: '10px 20px',
+                  background: isGeneratingSummary ? '#ccc' : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  cursor: isGeneratingSummary ? 'not-allowed' : 'pointer',
+                  boxShadow: isGeneratingSummary ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.4)',
+                  transition: 'all 0.2s ease'
+                }}
+              >
+                {isGeneratingSummary ? '⏳ Generating...' : '✨ Generate Summary'}
+              </button>
+            </div>
+            {summary ? (
+              <div style={{
+                padding: '15px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e0e0e0',
+                color: '#333',
+                lineHeight: '1.6',
+                fontSize: '15px',
+                whiteSpace: 'pre-wrap',
+                wordWrap: 'break-word'
+              }}>
+                {summary}
+              </div>
+            ) : (
+              <div style={{
+                padding: '20px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e0e0e0',
+                textAlign: 'center',
+                color: '#999',
+                fontStyle: 'italic'
+              }}>
+                Click "Generate Summary" to create a summary of this transcript
+              </div>
+            )}
+          </div>
+
+          {/* Chatbot Section */}
+          <div>
+            <h3 style={{ 
+              margin: '0 0 15px 0',
+              fontSize: '20px',
+              fontWeight: '600',
+              color: '#333'
+            }}>
+              💬 Chat with Transcript
+            </h3>
+            
+            {/* Chat Messages */}
+            <div 
+              ref={chatMessagesContainerRef}
+              style={{
+                minHeight: '300px',
+                maxHeight: '400px',
+                overflowY: 'auto',
+                padding: '15px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e0e0e0',
+                marginBottom: '15px'
+              }}
+            >
+              {chatMessages.length === 0 ? (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  height: '100%',
+                  color: '#999',
+                  fontStyle: 'italic',
+                  textAlign: 'center'
+                }}>
+                  Start a conversation by asking a question about the transcript
+                </div>
+              ) : (
+                chatMessages.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      marginBottom: '15px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start'
+                    }}
+                  >
+                    <div style={{
+                      padding: '12px 16px',
+                      background: msg.role === 'user' 
+                        ? 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)'
+                        : '#ffffff',
+                      color: msg.role === 'user' ? 'white' : '#333',
+                      borderRadius: '12px',
+                      maxWidth: '80%',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                      wordWrap: 'break-word',
+                      whiteSpace: 'pre-wrap',
+                      lineHeight: '1.6'
+                    }}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))
+              )}
+              <div ref={chatEndRef} style={{ height: '1px' }} />
+            </div>
+
+            {/* Chat Input */}
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!currentQuestion.trim() || isStreaming || !selectedMeeting) return
+
+                const question = currentQuestion.trim()
+                setCurrentQuestion('')
+                
+                // Focus the input immediately and keep it focused
+                requestAnimationFrame(() => {
+                  chatInputRef.current?.focus()
+                })
+                
+                // Add user message
+                const userMessage: ChatMessage = { role: 'user', content: question }
+                const updatedChatMessages = [...chatMessages, userMessage]
+                setChatMessages(updatedChatMessages)
+                
+                // Add placeholder assistant message
+                const assistantMessage: ChatMessage = { role: 'assistant', content: '' }
+                setChatMessages(prev => [...prev, assistantMessage])
+                
+                setIsStreaming(true)
+                setError(null)
+
+                try {
+                  await chatbotService.streamChatResponse(
+                    selectedMeeting,
+                    question,
+                    updatedChatMessages,
+                    (chunk: string) => {
+                      // Update the last message (assistant message) with streaming chunks
+                      // Create a new object instead of mutating
+                      setChatMessages(prev => {
+                        const updated = [...prev]
+                        const lastMsg = updated[updated.length - 1]
+                        if (lastMsg && lastMsg.role === 'assistant') {
+                          // Create a new message object instead of mutating
+                          updated[updated.length - 1] = {
+                            ...lastMsg,
+                            content: lastMsg.content + chunk
+                          }
+                        }
+                        return updated
+                      })
+                      // Scroll chat container to bottom (without affecting page scroll)
+                      requestAnimationFrame(() => {
+                        const container = chatMessagesContainerRef.current
+                        if (container) {
+                          container.scrollTop = container.scrollHeight
+                        }
+                      })
+                    },
+                    () => {
+                      setIsStreaming(false)
+                      // Focus input after streaming completes and scroll chat container
+                      requestAnimationFrame(() => {
+                        chatInputRef.current?.focus()
+                        const container = chatMessagesContainerRef.current
+                        if (container) {
+                          container.scrollTop = container.scrollHeight
+                        }
+                      })
+                    },
+                    (err: Error) => {
+                      console.error('Error streaming chat:', err)
+                      setError(err.message)
+                      setIsStreaming(false)
+                      // Remove the placeholder assistant message on error
+                      setChatMessages(prev => prev.slice(0, -1))
+                      // Focus input after error
+                      requestAnimationFrame(() => {
+                        chatInputRef.current?.focus()
+                      })
+                    }
+                  )
+                } catch (err) {
+                  console.error('Error starting chat:', err)
+                  setError(err instanceof Error ? err.message : 'Failed to send message')
+                  setIsStreaming(false)
+                  setChatMessages(prev => prev.slice(0, -1))
+                }
+              }}
+              style={{ display: 'flex', gap: '10px' }}
+            >
+              <input
+                ref={chatInputRef}
+                type="text"
+                value={currentQuestion}
+                onChange={(e) => setCurrentQuestion(e.target.value)}
+                placeholder="Ask a question about the transcript..."
+                disabled={isStreaming}
+                style={{
+                  flex: 1,
+                  padding: '12px 16px',
+                  border: '1px solid #ddd',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  outline: 'none',
+                  transition: 'border-color 0.2s ease'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = '#6366f1'
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = '#ddd'
+                }}
+              />
+              <button
+                type="submit"
+                disabled={!currentQuestion.trim() || isStreaming}
+                style={{
+                  padding: '12px 24px',
+                  background: (!currentQuestion.trim() || isStreaming)
+                    ? '#ccc'
+                    : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  cursor: (!currentQuestion.trim() || isStreaming) ? 'not-allowed' : 'pointer',
+                  boxShadow: (!currentQuestion.trim() || isStreaming)
+                    ? 'none'
+                    : '0 4px 12px rgba(99, 102, 241, 0.4)',
+                  transition: 'all 0.2s ease'
+                }}
+              >
+                {isStreaming ? '⏳' : '📤 Send'}
+              </button>
+            </form>
           </div>
         </div>
       )}
