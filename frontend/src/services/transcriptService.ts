@@ -77,6 +77,11 @@ export class TranscriptService {
       this.ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as TranscriptMessage;
+          console.log('📨 WebSocket message received:', {
+            type: message.type,
+            meeting_name: message.meeting_name,
+            timestamp: new Date().toLocaleTimeString()
+          });
           
           if (message.type === 'transcript') {
             if (message.speaker && message.text !== undefined) {
@@ -109,10 +114,16 @@ export class TranscriptService {
               }
             }
           } else if (message.type === 'transcript_new' || message.type === 'transcript_update') {
+            console.log(`📡 WebSocket: ${message.type} message received`, {
+              meeting_name: message.meeting_name,
+              transcript_count: message.transcripts?.length || 0,
+              timestamp: new Date().toLocaleTimeString()
+            });
+            
             if (message.transcripts && message.transcripts.length > 0) {
               const transcripts = message.transcripts;
               
-              transcripts.forEach((transcriptData: any) => {
+              transcripts.forEach((transcriptData: any, index: number) => {
                 const transcript = {
                   speaker: transcriptData.speaker,
                   text: transcriptData.text,
@@ -120,14 +131,25 @@ export class TranscriptService {
                   timestamp: Date.now(),
                 } as Transcript;
                 
-                this.listeners.forEach((listener) => {
+                console.log(`  📦 Transcript ${index + 1}/${transcripts.length}:`, {
+                  speaker: transcript.speaker,
+                  text: transcript.text?.substring(0, 100),
+                  is_final: transcript.is_final,
+                  meeting: message.meeting_name
+                });
+                
+                const listenersArray = Array.from(this.listeners);
+                listenersArray.forEach((listener, listenerIndex) => {
                   try {
+                    console.log(`    → Calling listener ${listenerIndex + 1} with transcript`);
                     listener(transcript, message.meeting_name);
                   } catch (err) {
-                    console.error('Error in transcript listener:', err);
+                    console.error(`    ❌ Error in transcript listener ${listenerIndex + 1}:`, err);
                   }
                 });
               });
+            } else {
+              console.warn(`⚠️ WebSocket: ${message.type} message received but no transcripts in payload`);
             }
           }
         } catch (error) {

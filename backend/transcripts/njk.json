@@ -1,0 +1,32 @@
+{
+  "meeting_name": "njk",
+  "transcripts": [
+    {
+      "speaker": "Speaker 1",
+      "text": "November ish, which is Thanksgiving time in the US. So I want to know, in your experience, what is Thanksgiving like in the US?",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "In the US? Well, it's pretty much just an American holiday, right? Yeah. For Canadian, I suppose.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 1",
+      "text": "Canada.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "Yeah. So Thanksgiving, the primary thing that we do is eat food. Okay. And.",
+      "is_final": true
+    },
+    {
+      "speaker": "Speaker 2",
+      "text": "It's really all about the food, especially turkey. So.",
+      "is_final": true
+    }
+  ],
+  "total_entries": 5,
+  "user_id": 1
+}

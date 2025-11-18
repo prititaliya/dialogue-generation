@@ -9,6 +9,7 @@ import logging
 from typing import Set, Dict, List, Tuple, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -28,7 +29,6 @@ from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     timedelta,
 )
-from room_user_mapping import get_user_id_for_room
 
 load_dotenv(".env.local")
 
@@ -57,13 +57,8 @@ def get_transcript_file_path(meeting_name: str) -> Path:
 def save_transcript_to_file(
     meeting_name: str, transcripts: List[Tuple[str, str]]
 ) -> Path:
-    """Save transcripts to a JSON file, then store in vector DB and delete JSON file"""
+    """Save transcripts to a JSON file"""
     file_path = get_transcript_file_path(meeting_name)
-    
-    # Get user_id from room mapping to include in metadata
-    from room_user_mapping import get_user_id_for_room
-    user_id = get_user_id_for_room(meeting_name)
-    
     transcript_data = {
         "meeting_name": meeting_name,
         "transcripts": [
@@ -72,13 +67,8 @@ def save_transcript_to_file(
         ],
         "total_entries": len(transcripts),
     }
-    
-    # Add user_id to metadata if available
-    if user_id:
-        transcript_data["user_id"] = user_id
 
     try:
-        # Save to JSON file first (temporary storage for frontend)
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(transcript_data, f, indent=2, ensure_ascii=False)
 
@@ -86,121 +76,14 @@ def save_transcript_to_file(
             f"💾 Saved transcript to {file_path.absolute()} ({len(transcripts)} entries)"
         )
         logger.info(f"📂 Full path: {file_path.resolve()}")
-        
-        # Now store in vector DB and delete JSON file
-        try:
-            from room_user_mapping import get_user_id_for_room
-            from vector_db.vector_store import store_transcript
-            from datetime import datetime
-            import uuid
-            
-            # Get user_id from room mapping
-            user_id = get_user_id_for_room(meeting_name)
-            
-            if user_id is None:
-                logger.warning(
-                    f"⚠️  No user mapping found for room '{meeting_name}'. "
-                    f"Skipping vector DB storage. JSON file will be kept."
-                )
-                return file_path
-            
-            # Check if transcript with same meeting_name already exists for this user
-            from vector_db.vector_store import get_redis_client
-            import json as json_module
-            
-            client = get_redis_client()
-            keys = client.keys("transcript:*")
-            existing_meeting_id = None
-            
-            # Search for existing transcript with same meeting_name and user_id
-            for key in keys:
-                data = client.hgetall(key)
-                stored_meeting_name = data.get(b'meeting_name')
-                stored_user_id = data.get(b'user_id')
-                
-                if stored_meeting_name and stored_user_id:
-                    stored_meeting_name_str = stored_meeting_name.decode('utf-8')
-                    stored_user_id_str = int(stored_user_id.decode('utf-8'))
-                    
-                    if stored_meeting_name_str == meeting_name and stored_user_id_str == user_id:
-                        # Found existing transcript - extract meeting_id from key
-                        existing_meeting_id = key.decode('utf-8').replace('transcript:', '')
-                        logger.info(f"📝 Found existing transcript for '{meeting_name}', will update it (meeting_id: {existing_meeting_id})")
-                        break
-            
-            # Generate meeting_id (use existing one if found, otherwise create new)
-            timestamp = datetime.now().timestamp()
-            if existing_meeting_id:
-                meeting_id = existing_meeting_id
-                logger.info(f"🔄 Updating existing transcript: {meeting_id}")
-            else:
-                meeting_id = f"{user_id}_{meeting_name}_{int(timestamp)}"
-                logger.info(f"✨ Creating new transcript: {meeting_id}")
-            
-            # Combine all transcript entries into single text string
-            # Format: "Speaker 1: text\nSpeaker 2: text"
-            transcript_text_parts = []
-            speakers_set = set()
-            
-            for speaker, text in transcripts:
-                if text.strip():  # Only include non-empty text
-                    transcript_text_parts.append(f"{speaker}: {text.strip()}")
-                    speakers_set.add(speaker)
-            
-            transcript_text = "\n".join(transcript_text_parts)
-            speakers_list = sorted(list(speakers_set))
-            
-            if not transcript_text:
-                logger.warning(
-                    f"⚠️  Empty transcript for '{meeting_name}'. Skipping vector DB storage."
-                )
-                return file_path
-            
-            # Store in vector DB (will update if meeting_id exists)
-            logger.info(f"📊 Storing transcript in vector DB: {meeting_name}")
-            stored_meeting_id = store_transcript(
-                user_id=user_id,
-                meeting_name=meeting_name,
-                transcript_text=transcript_text,
-                speakers=speakers_list,
-                timestamp=timestamp,
-                meeting_id=meeting_id,
-            )
-            
-            if stored_meeting_id:
-                # Successfully stored in vector DB, delete JSON file
-                try:
-                    file_path.unlink()
-                    logger.info(f"🗑️  Deleted JSON file after successful vector DB storage: {file_path}")
-                    logger.info(f"✅ Transcript '{meeting_name}' successfully stored in vector database")
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to delete JSON file {file_path}: {e}")
-            else:
-                logger.error(
-                    f"❌ Vector DB storage failed for '{meeting_name}'. "
-                    f"JSON file kept as fallback. Check Redis connection!"
-                )
-                # Don't delete JSON file if vector DB storage failed
-                
-        except ImportError as e:
-            logger.warning(
-                f"⚠️  Vector DB modules not available: {e}. "
-                f"Keeping JSON file. Install redis and sentence-transformers."
-            )
-        except Exception as e:
-            logger.error(
-                f"❌ Error storing transcript in vector DB: {e}. "
-                f"Keeping JSON file for fallback."
-            )
-        
         return file_path
     except Exception as e:
         logger.error(f"❌ Failed to save transcript to {file_path}: {e}")
         raise
 
 
-def load_transcript_from_file(meeting_name: str, filter_interim: bool = True) -> Optional[Dict]:
-    """Load transcript from a JSON file, optionally filtering out interim transcripts and deduplicating"""
+def load_transcript_from_file(meeting_name: str) -> Optional[Dict]:
+    """Load transcript from a JSON file"""
     file_path = get_transcript_file_path(meeting_name)
 
     if not file_path.exists():
@@ -210,41 +93,9 @@ def load_transcript_from_file(meeting_name: str, filter_interim: bool = True) ->
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
-        transcripts = data.get("transcripts", [])
-        
-        # Filter out interim transcripts if requested
-        if filter_interim:
-            # Only keep final transcripts
-            final_transcripts = [t for t in transcripts if t.get("is_final", False)]
-            
-            # Deduplicate: remove exact duplicates (same speaker and text)
-            seen = set()
-            deduplicated = []
-            for entry in final_transcripts:
-                speaker = entry.get("speaker", "")
-                text = entry.get("text", "").strip()
-                key = (speaker, text)
-                if key not in seen and text:  # Only add non-empty text
-                    seen.add(key)
-                    deduplicated.append(entry)
-            
-            data["transcripts"] = deduplicated
-            data["total_entries"] = len(deduplicated)
-            
-            if len(transcripts) != len(deduplicated):
-                logger.info(
-                    f"📖 Loaded transcript from {file_path}: filtered {len(transcripts)} -> {len(deduplicated)} final entries (removed {len(transcripts) - len(deduplicated)} interim/duplicates)"
-                )
-            else:
-                logger.info(
-                    f"📖 Loaded transcript from {file_path} ({len(deduplicated)} final entries)"
-                )
-        else:
-            logger.info(
-                f"📖 Loaded transcript from {file_path} ({len(transcripts)} entries, including interim)"
-            )
-        
+        logger.info(
+            f"📖 Loaded transcript from {file_path} ({data.get('total_entries', 0)} entries)"
+        )
         return data
     except Exception as e:
         logger.error(f"❌ Error loading transcript from {file_path}: {e}")
@@ -335,9 +186,9 @@ def update_transcript_incremental(
                         }
                     else:
                         # Check if this exact text already exists in recent entries (prevent repeats)
-                        # Check last 20 entries to catch duplicates (increased from 3)
+                        # Check last 3 entries to catch duplicates
                         is_duplicate = False
-                        for entry in transcripts[-20:]:
+                        for entry in transcripts[-3:]:
                             if (
                                 entry.get("speaker") == speaker
                                 and entry.get("text", "").strip() == text_stripped
@@ -363,9 +214,8 @@ def update_transcript_incremental(
                             return file_path
                 else:
                     # Different speaker - check if this exact text already exists in recent entries
-                    # Check last 20 entries to catch duplicates (increased from 3)
                     is_duplicate = False
-                    for entry in transcripts[-20:]:
+                    for entry in transcripts[-3:]:
                         if (
                             entry.get("speaker") == speaker
                             and entry.get("text", "").strip() == text_stripped
@@ -396,72 +246,33 @@ def update_transcript_incremental(
                 )
         else:
             # Interim event: Update last entry if same speaker, or create new interim entry
-            # IMPORTANT: Interim transcripts should replace previous interim from same speaker
-            # to prevent accumulation of duplicate interim updates
-            text_stripped = text.strip()
-            if not text_stripped:
-                # Skip empty text
-                return file_path
-                
             if transcripts:
                 last_entry = transcripts[-1]
                 if last_entry.get("speaker") == speaker and not last_entry.get(
                     "is_final", False
                 ):
-                    # Update existing interim entry (replace, don't accumulate)
+                    # Update existing interim entry
                     transcripts[-1] = {
                         "speaker": speaker,
-                        "text": text_stripped,
+                        "text": text.strip(),
                         "is_final": False,
                     }
                 elif last_entry.get("speaker") == speaker and last_entry.get(
                     "is_final", False
                 ):
                     # Same speaker but last entry was final, create new interim entry
-                    # But first check if this exact interim text already exists (prevent duplicates)
-                    is_duplicate = False
-                    # Check last 10 entries for duplicate interim transcripts
-                    for entry in transcripts[-10:]:
-                        if (
-                            entry.get("speaker") == speaker
-                            and entry.get("text", "").strip() == text_stripped
-                            and not entry.get("is_final", False)
-                        ):
-                            is_duplicate = True
-                            logger.debug(
-                                f"⏭️  Skipping duplicate interim transcript: {speaker} - {text_stripped[:30]}..."
-                            )
-                            break
-                    
-                    if not is_duplicate:
-                        transcripts.append(
-                            {"speaker": speaker, "text": text_stripped, "is_final": False}
-                        )
+                    transcripts.append(
+                        {"speaker": speaker, "text": text.strip(), "is_final": False}
+                    )
                 else:
                     # Different speaker, create new interim entry
-                    # But check for duplicates first
-                    is_duplicate = False
-                    # Check last 10 entries for duplicate interim transcripts
-                    for entry in transcripts[-10:]:
-                        if (
-                            entry.get("speaker") == speaker
-                            and entry.get("text", "").strip() == text_stripped
-                            and not entry.get("is_final", False)
-                        ):
-                            is_duplicate = True
-                            logger.debug(
-                                f"⏭️  Skipping duplicate interim transcript (different speaker): {speaker} - {text_stripped[:30]}..."
-                            )
-                            break
-                    
-                    if not is_duplicate:
-                        transcripts.append(
-                            {"speaker": speaker, "text": text_stripped, "is_final": False}
-                        )
+                    transcripts.append(
+                        {"speaker": speaker, "text": text.strip(), "is_final": False}
+                    )
             else:
                 # No existing transcripts, create first interim entry
                 transcripts.append(
-                    {"speaker": speaker, "text": text_stripped, "is_final": False}
+                    {"speaker": speaker, "text": text.strip(), "is_final": False}
                 )
 
         # Update data structure
@@ -469,12 +280,6 @@ def update_transcript_incremental(
         data["total_entries"] = len(
             [t for t in transcripts if t.get("is_final", False)]
         )
-        
-        # Ensure user_id is in metadata (for ownership validation)
-        from room_user_mapping import get_user_id_for_room
-        user_id = get_user_id_for_room(meeting_name)
-        if user_id and "user_id" not in data:
-            data["user_id"] = user_id
 
         # Save back to file with locking (if available)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -491,60 +296,25 @@ def update_transcript_incremental(
             f"💾 Incrementally updated transcript: {speaker} - {text[:30]}... (final={is_final})"
         )
 
-        # Broadcast the update to all connected WebSocket clients for this user
+        # Broadcast the update to all connected WebSocket clients
         if broadcast:
             try:
-                # Get user_id from room mapping
-                user_id = get_user_id_for_room(meeting_name)
-                if user_id is None:
-                    logger.warning(
-                        f"⚠️  No user_id found for room {meeting_name}, skipping broadcast"
-                    )
-                else:
-                    # Try to get the current event loop
-                    try:
-                        loop = asyncio.get_running_loop()
-                        # If we're in an async context, schedule the broadcast as a task
-                        loop.create_task(
-                            transcript_manager.broadcast_transcript(
-                                speaker, text.strip(), is_final, meeting_name, user_id
-                            )
+                # Try to get the current event loop
+                try:
+                    asyncio.get_running_loop()
+                    # If we're in an async context, schedule the broadcast as a task
+                    asyncio.create_task(
+                        transcript_manager.broadcast_transcript(
+                            speaker, text.strip(), is_final, meeting_name
                         )
-                    except RuntimeError:
-                        # No running event loop - try to get the event loop from the transcript manager
-                        # The transcript manager should have access to the API server's event loop
-                        try:
-                            # Get the event loop that was set for the file watcher
-                            if transcript_manager.file_watcher.event_loop:
-                                transcript_manager.file_watcher.event_loop.create_task(
-                                    transcript_manager.broadcast_transcript(
-                                        speaker, text.strip(), is_final, meeting_name, user_id
-                                    )
-                                )
-                            else:
-                                # Fallback: use run_coroutine_threadsafe if we have an event loop
-                                import threading
-                                try:
-                                    loop = asyncio.get_event_loop()
-                                    if loop.is_running():
-                                        asyncio.run_coroutine_threadsafe(
-                                            transcript_manager.broadcast_transcript(
-                                                speaker, text.strip(), is_final, meeting_name, user_id
-                                            ),
-                                            loop
-                                        )
-                                    else:
-                                        logger.warning(
-                                            "⚠️  No running event loop for broadcast, file watcher will handle updates"
-                                        )
-                                except Exception:
-                                    logger.warning(
-                                        "⚠️  No event loop available for broadcast, file watcher will handle updates"
-                                    )
-                        except Exception as e:
-                            logger.warning(
-                                f"⚠️  Error scheduling broadcast: {e}. File watcher will handle updates."
-                            )
+                    )
+                except RuntimeError:
+                    # No running event loop - this shouldn't happen in async context
+                    # But if it does, we'll try to create a new event loop
+                    # Note: This is a fallback and may not work in all cases
+                    logger.warning(
+                        "⚠️  No running event loop for broadcast, skipping WebSocket update"
+                    )
             except Exception as e:
                 logger.warning(f"⚠️  Error broadcasting transcript update: {e}")
 
@@ -615,7 +385,7 @@ class TranscriptFileWatcher(FileSystemEventHandler):
                 del self.last_known_state[meeting_name]
 
     def on_modified(self, event):
-        """Called when a file is modified - watchdog detects JSON file changes"""
+        """Called when a file is modified"""
         if event.is_directory:
             return
 
@@ -628,13 +398,12 @@ class TranscriptFileWatcher(FileSystemEventHandler):
 
         # Only process if someone is watching this file
         if meeting_name not in self.watched_files:
-            logger.debug(f"File '{meeting_name}.json' changed but no watchers")
             return
-
 
         # Small delay to ensure file write is complete
         import time
-        time.sleep(0.15)  # Slightly longer delay to ensure file is fully written
+
+        time.sleep(0.1)
 
         try:
             # Read the updated file
@@ -652,12 +421,11 @@ class TranscriptFileWatcher(FileSystemEventHandler):
             last_count = len(last_transcripts)
             new_count = len(new_transcripts)
 
-
             if new_count > last_count:
                 # New entries added - send them to watching clients
                 new_entries = new_transcripts[last_count:]
                 logger.info(
-                    f"📝 Watchdog: Detected {len(new_entries)} NEW transcript entries in '{meeting_name}' - sending to frontend"
+                    f"📝 Detected {len(new_entries)} new transcript entries in '{meeting_name}'"
                 )
 
                 # Update last known state
@@ -666,49 +434,23 @@ class TranscriptFileWatcher(FileSystemEventHandler):
                 # Send new entries to all watching WebSockets
                 self._send_updates_to_watchers(meeting_name, new_entries)
             elif new_count == last_count and new_transcripts != last_transcripts:
-                # Same count but content changed (likely an update to last entry or interim update)
+                # Same count but content changed (likely an update to last entry)
                 # Check if the last entry was updated
                 if new_transcripts and last_transcripts:
                     last_new = new_transcripts[-1]
                     last_old = last_transcripts[-1]
                     if last_new != last_old:
-                        # Last entry was updated (interim or final)
+                        # Last entry was updated
                         logger.info(
-                            f"📝 Watchdog: Detected UPDATE to last transcript entry in '{meeting_name}': {last_new.get('speaker', 'Unknown')} - {last_new.get('text', '')[:50]}... (final={last_new.get('is_final', False)}) - sending to frontend"
+                            f"📝 Detected update to last transcript entry in '{meeting_name}'"
                         )
                         self.last_known_state[meeting_name] = new_data
                         self._send_updates_to_watchers(
                             meeting_name, [last_new], is_update=True
                         )
-                    else:
-                        # Check if any entries changed (for interim updates that replace entries)
-                        changed_entries = []
-                        for i, (old_entry, new_entry) in enumerate(zip(last_transcripts, new_transcripts)):
-                            if old_entry != new_entry:
-                                changed_entries.append(new_entry)
-                        if changed_entries:
-                            logger.info(
-                                f"📝 Watchdog: Detected {len(changed_entries)} UPDATED transcript entries in '{meeting_name}' - sending to frontend"
-                            )
-                            self.last_known_state[meeting_name] = new_data
-                            self._send_updates_to_watchers(
-                                meeting_name, changed_entries, is_update=True
-                            )
-                else:
-                    # No last transcripts but new ones exist - send all
-                    if new_transcripts:
-                        logger.info(
-                            f"📝 Watchdog: Detected new transcript data in '{meeting_name}' (no previous state) - sending all {len(new_transcripts)} entries to frontend"
-                        )
-                        self.last_known_state[meeting_name] = new_data
-                        self._send_updates_to_watchers(meeting_name, new_transcripts)
-            elif new_count < last_count:
-                self.last_known_state[meeting_name] = new_data
 
-        except json.JSONDecodeError as e:
-            logger.warning(f"⚠️ Watchdog: JSON decode error for '{meeting_name}': {e} - file might be partially written")
         except Exception as e:
-            logger.error(f"❌ Watchdog: Error processing file change for '{meeting_name}': {e}", exc_info=True)
+            logger.error(f"Error processing file change for {meeting_name}: {e}")
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         """Set the event loop to use for sending updates from file watcher thread"""
@@ -753,26 +495,11 @@ class TranscriptFileWatcher(FileSystemEventHandler):
     async def _async_send_updates(
         self, watchers: List[WebSocket], message: Dict, meeting_name: str
     ):
-        """Async helper to send updates to watchers - only to users who own the transcript"""
-        # Get user_id for this room
-        room_user_id = get_user_id_for_room(meeting_name)
-        
+        """Async helper to send updates to watchers"""
         disconnected = set()
         for websocket in watchers:
             try:
-                # Verify user ownership before sending
-                watcher_user_id = self.transcript_manager.get_user_id_for_connection(websocket)
-                if room_user_id and watcher_user_id != room_user_id:
-                    # This watcher doesn't own the transcript - remove them from watchers
-                    logger.warning(
-                        f"⚠️  Removing watcher (user_id={watcher_user_id}) for room {meeting_name} owned by user {room_user_id}"
-                    )
-                    self.remove_watcher(meeting_name, websocket)
-                    continue
-                
-                # Send update only if user owns the transcript or room_user_id is not set (backward compatibility)
-                if room_user_id is None or watcher_user_id == room_user_id:
-                    await websocket.send_json(message)
+                await websocket.send_json(message)
             except Exception as e:
                 logger.error(f"Error sending file update to client: {e}")
                 disconnected.add(websocket)
@@ -787,53 +514,34 @@ class TranscriptFileWatcher(FileSystemEventHandler):
 class TranscriptManager:
     def __init__(self):
         self.connections: Set[WebSocket] = set()
-        self.connection_users: Dict[WebSocket, int] = {}  # Map WebSocket to user_id
-        self.user_transcripts: Dict[int, List[Tuple[str, str, bool]]] = {}  # Per-user transcripts
+        self.transcripts: List[Tuple[str, str, bool]] = []  # (speaker, text, is_final)
         self.speaker_label_map: Dict[str, str] = {}
         self.lock = asyncio.Lock()
         self.file_watcher = TranscriptFileWatcher(self)
         self.observer: Optional[Observer] = None
 
-    async def connect(self, websocket: WebSocket, user_id: int):
+    async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.connections.add(websocket)
-        self.connection_users[websocket] = user_id
-        
-        # Initialize user transcripts if not exists
-        if user_id not in self.user_transcripts:
-            self.user_transcripts[user_id] = []
-        
-        logger.info(f"Client connected (user_id={user_id}). Total connections: {len(self.connections)}")
+        logger.info(f"Client connected. Total connections: {len(self.connections)}")
 
-        # Send existing transcripts for this user only
-        user_transcripts = self.user_transcripts.get(user_id, [])
-        if user_transcripts:
+        # Send existing transcripts to new client
+        if self.transcripts:
             await websocket.send_json(
                 {
                     "type": "initial_transcripts",
                     "transcripts": [
                         {"speaker": sp, "text": txt, "is_final": is_final}
-                        for sp, txt, is_final in user_transcripts
+                        for sp, txt, is_final in self.transcripts
                     ],
                 }
             )
 
     def disconnect(self, websocket: WebSocket):
         self.connections.discard(websocket)
-        # Remove user mapping
-        if websocket in self.connection_users:
-            del self.connection_users[websocket]
         # Remove from all file watchers
         self.file_watcher.remove_all_watchers_for_websocket(websocket)
         logger.info(f"Client disconnected. Total connections: {len(self.connections)}")
-    
-    def get_user_id_for_connection(self, websocket: WebSocket) -> Optional[int]:
-        """Get user_id for a WebSocket connection"""
-        return self.connection_users.get(websocket)
-    
-    def get_connections_for_user(self, user_id: int) -> List[WebSocket]:
-        """Get all WebSocket connections for a specific user"""
-        return [ws for ws, uid in self.connection_users.items() if uid == user_id]
 
     def start_file_observer(self):
         """Start the file system observer to watch transcript files"""
@@ -861,37 +569,26 @@ class TranscriptManager:
         text: str,
         is_final: bool = True,
         meeting_name: Optional[str] = None,
-        user_id: Optional[int] = None,
     ):
-        """Broadcast a transcript to connected clients, filtered by user_id"""
+        """Broadcast a transcript to all connected clients"""
         async with self.lock:
             text_stripped = text.strip()
             if not text_stripped:
                 # Skip empty text
                 return
 
-            # Store transcript per user
-            if user_id is None:
-                logger.warning("broadcast_transcript called without user_id - skipping storage")
-                return
-            
-            # Initialize user transcripts if not exists
-            if user_id not in self.user_transcripts:
-                self.user_transcripts[user_id] = []
-            
-            user_transcripts = self.user_transcripts[user_id]
+            # Store transcript
             is_duplicate = False
-            
             if is_final:
                 # Check if this is an update to the last transcript from the same speaker
                 updated_existing = False
 
-                if user_transcripts:
-                    last_speaker, last_text, last_is_final = user_transcripts[-1]
+                if self.transcripts:
+                    last_speaker, last_text, last_is_final = self.transcripts[-1]
                     if speaker == last_speaker:
                         if not last_is_final:
                             # Converting interim to final - update existing entry
-                            user_transcripts[-1] = (speaker, text_stripped, is_final)
+                            self.transcripts[-1] = (speaker, text_stripped, is_final)
                             updated_existing = True
                         elif last_text == text_stripped:
                             # Exact duplicate - skip adding
@@ -903,12 +600,11 @@ class TranscriptManager:
                             last_text
                         ):
                             # Both final, text is extension - update existing entry
-                            user_transcripts[-1] = (speaker, text_stripped, is_final)
+                            self.transcripts[-1] = (speaker, text_stripped, is_final)
                             updated_existing = True
                         else:
                             # Check if this exact text already exists in recent entries (prevent repeats)
-                            # Check last 20 entries to catch duplicates (increased from 3)
-                            for entry in user_transcripts[-20:]:
+                            for entry in self.transcripts[-3:]:
                                 entry_speaker, entry_text, entry_is_final = entry
                                 if (
                                     entry_speaker == speaker
@@ -922,8 +618,7 @@ class TranscriptManager:
                                     break
                     else:
                         # Different speaker - check if this exact text already exists in recent entries
-                        # Check last 20 entries to catch duplicates (increased from 3)
-                        for entry in user_transcripts[-20:]:
+                        for entry in self.transcripts[-3:]:
                             entry_speaker, entry_text, entry_is_final = entry
                             if (
                                 entry_speaker == speaker
@@ -937,25 +632,23 @@ class TranscriptManager:
                                 break
 
                 if not updated_existing and not is_duplicate:
-                    user_transcripts.append((speaker, text_stripped, is_final))
+                    self.transcripts.append((speaker, text_stripped, is_final))
             else:
                 # For interim transcripts, update last entry if same speaker, or append new
                 updated_existing = False
-                if user_transcripts:
-                    last_speaker, last_text, last_is_final = user_transcripts[-1]
+                if self.transcripts:
+                    last_speaker, last_text, last_is_final = self.transcripts[-1]
                     if speaker == last_speaker and not last_is_final:
                         # Update existing interim entry
-                        user_transcripts[-1] = (speaker, text_stripped, is_final)
+                        self.transcripts[-1] = (speaker, text_stripped, is_final)
                         updated_existing = True
 
                 if not updated_existing:
-                    user_transcripts.append((speaker, text_stripped, is_final))
+                    self.transcripts.append((speaker, text_stripped, is_final))
 
-        # Broadcast to all connected clients for this user only
-        # Skip only final duplicates, but always broadcast interim transcripts (even if duplicate)
-        # This ensures real-time updates are visible during recording
+        # Broadcast to all connected clients (only if not a duplicate)
         if is_final and is_duplicate:
-            # Don't broadcast duplicate final transcripts
+            # Don't broadcast duplicates
             return
 
         message = {
@@ -966,18 +659,15 @@ class TranscriptManager:
             "meeting_name": meeting_name,
         }
 
-        # Get connections for this user only
-        user_connections = self.get_connections_for_user(user_id) if user_id else []
-
-        logger.debug(
-            f"Broadcasting transcript to user_id={user_id}: {speaker} - {text_stripped[:50]}... (final={is_final}, connections={len(user_connections)})"
+        logger.info(
+            f"Broadcasting transcript: {speaker} - {text_stripped[:50]}... (final={is_final}, connections={len(self.connections)})"
         )
 
-        if len(user_connections) == 0:
-            logger.debug(f"No WebSocket connections available for user_id={user_id} to send transcript to!")
+        if len(self.connections) == 0:
+            logger.warning("No WebSocket connections available to send transcript to!")
 
         disconnected = set()
-        for connection in user_connections:
+        for connection in self.connections:
             try:
                 await connection.send_json(message)
             except Exception as e:
@@ -996,38 +686,28 @@ class TranscriptManager:
         """Get speaker label for a speaker ID"""
         return self.speaker_label_map.get(speaker_id, f"Speaker {speaker_id}")
 
-    async def update_transcripts(self, speaker: str, text: str, is_final: bool = True, user_id: Optional[int] = None):
-        """Update internal transcript list without broadcasting (for accumulation) - requires user_id"""
-        if user_id is None:
-            logger.warning("update_transcripts called without user_id - skipping")
-            return
-            
+    async def update_transcripts(self, speaker: str, text: str, is_final: bool = True):
+        """Update internal transcript list without broadcasting (for accumulation)"""
         async with self.lock:
             text_stripped = text.strip()
             if not text_stripped:
                 # Skip empty text
                 return
 
-            # Initialize user transcripts if not exists
-            if user_id not in self.user_transcripts:
-                self.user_transcripts[user_id] = []
-
-            user_transcripts = self.user_transcripts[user_id]
-            
             # Check if this is an update to the last transcript from the same speaker
             updated_existing = False
             is_duplicate = False
 
-            if user_transcripts:
-                last_speaker, last_text, last_is_final = user_transcripts[-1]
+            if self.transcripts:
+                last_speaker, last_text, last_is_final = self.transcripts[-1]
                 if speaker == last_speaker:
                     if not is_final and not last_is_final:
                         # Both interim - update existing entry
-                        user_transcripts[-1] = (speaker, text_stripped, is_final)
+                        self.transcripts[-1] = (speaker, text_stripped, is_final)
                         updated_existing = True
                     elif is_final and not last_is_final:
                         # Converting interim to final - update existing entry
-                        user_transcripts[-1] = (speaker, text_stripped, is_final)
+                        self.transcripts[-1] = (speaker, text_stripped, is_final)
                         updated_existing = True
                     elif is_final and last_is_final:
                         # Both final - check for duplicates or extensions
@@ -1041,11 +721,11 @@ class TranscriptManager:
                             last_text
                         ):
                             # Text is extension - update existing entry
-                            user_transcripts[-1] = (speaker, text_stripped, is_final)
+                            self.transcripts[-1] = (speaker, text_stripped, is_final)
                             updated_existing = True
                         else:
                             # Check if this exact text already exists in recent entries (prevent repeats)
-                            for entry in user_transcripts[-3:]:
+                            for entry in self.transcripts[-3:]:
                                 entry_speaker, entry_text, entry_is_final = entry
                                 if (
                                     entry_speaker == speaker
@@ -1059,7 +739,7 @@ class TranscriptManager:
                                     break
                 else:
                     # Different speaker - check if this exact text already exists in recent entries
-                    for entry in user_transcripts[-3:]:
+                    for entry in self.transcripts[-3:]:
                         entry_speaker, entry_text, entry_is_final = entry
                         if (
                             entry_speaker == speaker
@@ -1073,25 +753,16 @@ class TranscriptManager:
                             break
 
             if not updated_existing and not is_duplicate:
-                user_transcripts.append((speaker, text_stripped, is_final))
+                self.transcripts.append((speaker, text_stripped, is_final))
 
     async def send_complete_transcript(
-        self, meeting_title: str, transcript_list: List[Tuple[str, str]] = None, user_id: Optional[int] = None
+        self, meeting_title: str, transcript_list: List[Tuple[str, str]] = None
     ):
-        """Send complete transcript to connected clients for a specific user when recording stops"""
+        """Send complete transcript to all connected clients when recording stops"""
         async with self.lock:
-            # Get user_id from room mapping if not provided
-            if user_id is None:
-                user_id = get_user_id_for_room(meeting_title)
-            
-            if user_id is None:
-                logger.warning(f"Cannot send complete transcript for {meeting_title}: no user_id found")
-                return
-
-            # Use provided transcript_list or fall back to user-specific transcripts
+            # Use provided transcript_list or fall back to internal transcripts
             if transcript_list is None:
-                user_transcripts = self.user_transcripts.get(user_id, [])
-                transcript_list = [(sp, txt) for sp, txt, _ in user_transcripts]
+                transcript_list = [(sp, txt) for sp, txt, _ in self.transcripts]
 
             # Save transcript to file
             if transcript_list:
@@ -1109,20 +780,17 @@ class TranscriptManager:
                 "transcripts": transcript_data,
             }
 
-            # Get connections for this user only
-            user_connections = self.get_connections_for_user(user_id)
-            
             logger.info(
-                f"Sending complete transcript: {meeting_title} with {len(transcript_data)} entries to user_id={user_id} (connections={len(user_connections)})"
+                f"Sending complete transcript: {meeting_title} with {len(transcript_data)} entries (connections={len(self.connections)})"
             )
 
-            if len(user_connections) == 0:
+            if len(self.connections) == 0:
                 logger.warning(
-                    f"No WebSocket connections available for user_id={user_id} to send complete transcript to!"
+                    "No WebSocket connections available to send complete transcript to!"
                 )
 
             disconnected = set()
-            for connection in user_connections:
+            for connection in self.connections:
                 try:
                     await connection.send_json(message)
                 except Exception as e:
@@ -1149,22 +817,6 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Database initialization error: {e}")
         logger.error("⚠️  Server will start but authentication features may not work properly.")
         logger.error("⚠️  Please check your DATABASE_URL in .env.local and ensure PostgreSQL is running.")
-    
-    # Initialize vector database index
-    try:
-        from vector_db.vector_store import init_vector_index
-        if init_vector_index():
-            logger.info("✅ Vector database index initialized")
-        else:
-            logger.warning("⚠️  Vector database index initialization failed")
-            logger.warning("⚠️  Transcripts will be stored in JSON files only. Check Redis connection.")
-    except ImportError as e:
-        logger.warning(f"⚠️  Vector DB modules not available: {e}")
-        logger.warning("⚠️  Install redis and sentence-transformers to enable vector storage.")
-    except Exception as e:
-        logger.warning(f"⚠️  Vector DB initialization error: {e}")
-        logger.warning("⚠️  Transcripts will be stored in JSON files only. Check Redis connection.")
-    
     # Set the event loop for the file watcher
     transcript_manager.file_watcher.set_event_loop(asyncio.get_running_loop())
     # Start file observer for transcript files
@@ -1218,7 +870,6 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
-
 
 @app.get("/")
 async def root():
@@ -1307,17 +958,6 @@ async def list_endpoints():
                 "path": "/transcripts/update",
                 "description": "Update transcripts from main.py process",
                 "body": {"transcripts": "array", "room_name": "string"}
-            },
-            {
-                "method": "GET",
-                "path": "/transcripts/vector",
-                "description": "Get transcript from vector database by username and meeting name",
-                "auth_required": True,
-                "query_params": {
-                    "username": "string (required)",
-                    "meeting_name": "string (required)"
-                },
-                "response": "Transcript object with meeting_id, meeting_name, user_id, username, timestamp, speakers, and transcript_text"
             }
         ],
         "livekit": [
@@ -1359,72 +999,6 @@ async def check_database(db: Session = Depends(get_db)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Database connection failed: {str(e)}"
         )
-
-
-@app.get("/health/vector-db")
-async def check_vector_db():
-    """Check Redis vector database connection"""
-    try:
-        from vector_db.vector_store import get_redis_client
-        client = get_redis_client()
-        client.ping()
-        
-        # Count transcripts
-        keys = client.keys("transcript:*")
-        return {
-            "status": "healthy",
-            "vector_db": "connected",
-            "transcript_count": len(keys)
-        }
-    except ImportError as e:
-        error_msg = str(e)
-        if "tensorflow" in error_msg.lower() or "sentence" in error_msg.lower():
-            return {
-                "status": "unhealthy",
-                "vector_db": "module_import_error",
-                "error": "TensorFlow/sentence-transformers import failed",
-                "message": "Vector DB module cannot be loaded due to dependency issues. Check TensorFlow installation.",
-                "solution": "Try: pip install --upgrade tensorflow sentence-transformers or fix TensorFlow library conflicts"
-            }
-        return {
-            "status": "unhealthy",
-            "vector_db": "module_import_error",
-            "error": str(e),
-            "message": "Vector DB module cannot be imported."
-        }
-    except Exception as e:
-        error_str = str(e)
-        # Check if it's a Redis connection error
-        if "connection" in error_str.lower() or "redis" in error_str.lower() or "Connection refused" in error_str:
-            return {
-                "status": "unhealthy",
-                "vector_db": "disconnected",
-                "error": error_str,
-                "message": "Redis is not running. Start Redis with: redis-server or docker run -d -p 6379:6379 redis/redis-stack"
-            }
-        # Check if it's a TensorFlow import error (might be caught as generic Exception)
-        if "tensorflow" in error_str.lower() or "dlopen" in error_str.lower() or "Symbol not found" in error_str:
-            return {
-                "status": "unhealthy",
-                "vector_db": "module_import_error",
-                "error": "TensorFlow library loading failed",
-                "message": "TensorFlow native libraries cannot be loaded. This is often due to incompatible system libraries.",
-                "solution": "Try: pip install --upgrade tensorflow or use a conda environment with compatible libraries"
-            }
-        return {
-            "status": "unhealthy",
-            "vector_db": "disconnected",
-            "error": str(e),
-            "message": "Redis is not running. Start Redis with: redis-server or docker run -d -p 6379:6379 redis/redis-stack"
-        }
-    except Exception as e:
-        logger.error(f"Vector DB health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "vector_db": "error",
-            "error": str(e),
-            "message": "Vector DB check failed. Check Redis connection and dependencies."
-        }
 
 
 # Authentication endpoints
@@ -1549,16 +1123,11 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
 
 @app.get("/health")
 async def health():
-    # Calculate total transcripts across all users
-    total_transcripts = sum(
-        len(transcripts) 
-        for transcripts in transcript_manager.user_transcripts.values()
-    )
     return {
         "status": "healthy",
         "websocket_endpoint": "/ws/transcripts",
         "active_connections": len(transcript_manager.connections),
-        "total_transcripts": total_transcripts,
+        "total_transcripts": len(transcript_manager.transcripts),
     }
 
 
@@ -1569,63 +1138,11 @@ async def get_transcripts(
     ),
     current_user = Depends(get_current_user),
 ):
-    """
-    Get transcripts - first try vector DB, then fall back to JSON file (for active recordings)
-    """
+    """Get transcripts - either from file (if meeting_name provided) or from memory"""
     if meeting_name:
-        # First, try to get from vector database
-        try:
-            from vector_db.vector_store import get_redis_client
-            import json
-            
-            client = get_redis_client()
-            keys = client.keys("transcript:*")
-            
-            # Search for matching transcript by meeting_name and user_id
-            for key in keys:
-                data = client.hgetall(key)
-                stored_meeting_name = data.get(b'meeting_name')
-                stored_user_id = data.get(b'user_id')
-                
-                if stored_meeting_name and stored_user_id:
-                    stored_meeting_name_str = stored_meeting_name.decode('utf-8')
-                    stored_user_id_str = int(stored_user_id.decode('utf-8'))
-                    
-                    if stored_meeting_name_str == meeting_name and stored_user_id_str == current_user.id:
-                        # Found in vector DB - parse transcript_text back to transcript entries
-                        transcript_text = data.get(b'transcript_text', b'').decode('utf-8')
-                        speakers_str = data.get(b'speakers', b'[]').decode('utf-8')
-                        speakers = json.loads(speakers_str)
-                        
-                        # Parse transcript_text back to individual entries
-                        # Format: "Speaker 1: text\nSpeaker 2: text"
-                        transcript_entries = []
-                        for line in transcript_text.split('\n'):
-                            if ':' in line:
-                                parts = line.split(':', 1)
-                                if len(parts) == 2:
-                                    speaker = parts[0].strip()
-                                    text = parts[1].strip()
-                                    if text:
-                                        transcript_entries.append({
-                                            "speaker": speaker,
-                                            "text": text,
-                                            "is_final": True
-                                        })
-                        
-                        return {
-                            "meeting_name": stored_meeting_name_str,
-                            "transcripts": transcript_entries,
-                            "total_entries": len(transcript_entries),
-                            "source": "vector_db"
-                        }
-        except Exception as e:
-            logger.warning(f"Error fetching from vector DB, trying JSON file: {e}")
-        
-        # Fall back to JSON file (for active recordings that haven't been stored yet)
+        # Load from file
         transcript_data = load_transcript_from_file(meeting_name)
         if transcript_data:
-            transcript_data["source"] = "json_file"
             return transcript_data
         else:
             raise HTTPException(
@@ -1633,239 +1150,49 @@ async def get_transcripts(
                 detail=f"Transcript not found for meeting: {meeting_name}",
             )
     else:
-        # Return from memory (backward compatibility for active recording)
-        # Get transcripts for current user only
-        user_transcripts = transcript_manager.user_transcripts.get(current_user.id, [])
+        # Return from memory (backward compatibility)
         return {
             "transcripts": [
                 {"speaker": sp, "text": txt, "is_final": is_final}
-                for sp, txt, is_final in user_transcripts
+                for sp, txt, is_final in transcript_manager.transcripts
             ],
             "speaker_labels": transcript_manager.speaker_label_map,
-            "source": "memory"
         }
 
 
 @app.get("/transcripts/list")
 async def list_all_transcripts(current_user = Depends(get_current_user)):
-    """List all available transcripts from vector database for current user"""
+    """List all available transcripts from the transcripts directory"""
     try:
-        transcript_list = []
-        meeting_transcripts = {}  # meeting_name -> transcript_data (for deduplication)
-        
-        # Get transcripts from vector database
-        try:
-            from vector_db.vector_store import get_redis_client
-            import json
-            
-            client = get_redis_client()
-            keys = client.keys("transcript:*")
-            
-            # Filter transcripts for current user and deduplicate by meeting_name
-            # Use a dict to track the most recent transcript for each meeting_name
-            
-            for key in keys:
-                data = client.hgetall(key)
-                stored_user_id = data.get(b'user_id')
-                
-                if stored_user_id and int(stored_user_id.decode('utf-8')) == current_user.id:
-                    meeting_name = data.get(b'meeting_name', b'').decode('utf-8')
-                    timestamp = int(data.get(b'timestamp', b'0').decode('utf-8'))
-                    transcript_text = data.get(b'transcript_text', b'').decode('utf-8')
-                    
-                    # Count entries (lines with speaker: text format)
-                    entry_count = len([line for line in transcript_text.split('\n') if ':' in line and line.split(':', 1)[1].strip()])
-                    
-                    transcript_data = {
-                        "meeting_name": meeting_name,
-                        "file_name": meeting_name,  # Keep for backward compatibility
-                        "total_entries": entry_count,
-                        "last_modified": timestamp,  # Use timestamp as last_modified
-                        "source": "vector_db"
-                    }
-                    
-                    # Keep only the most recent transcript for each meeting_name
-                    if meeting_name not in meeting_transcripts:
-                        meeting_transcripts[meeting_name] = transcript_data
-                    else:
-                        # If this transcript is newer, replace the old one
-                        if timestamp > meeting_transcripts[meeting_name]["last_modified"]:
-                            meeting_transcripts[meeting_name] = transcript_data
-            
-            # Convert dict to list
-            transcript_list = list(meeting_transcripts.values())
-        except Exception as e:
-            logger.warning(f"Error fetching from vector DB: {e}")
-        
-        # Also check JSON files (for active recordings that haven't been stored yet)
+        transcript_files = []
         if TRANSCRIPTS_DIR.exists():
             for file_path in TRANSCRIPTS_DIR.glob("*.json"):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                        # Extract meeting name from filename (remove .json extension)
                         meeting_name = file_path.stem
-                        
-                        # Check if this meeting is already in vector DB
-                        already_in_db = meeting_name in meeting_transcripts
-                        
-                        if not already_in_db:
-                            transcript_list.append({
+                        transcript_files.append(
+                            {
                                 "meeting_name": data.get("meeting_name", meeting_name),
                                 "file_name": meeting_name,
                                 "total_entries": data.get("total_entries", 0),
                                 "last_modified": file_path.stat().st_mtime,
-                                "source": "json_file"
-                            })
+                            }
+                        )
                 except Exception as e:
                     logger.warning(f"Error reading transcript file {file_path}: {e}")
                     continue
 
         # Sort by last modified (newest first)
-        transcript_list.sort(key=lambda x: x.get("last_modified", 0), reverse=True)
+        transcript_files.sort(key=lambda x: x.get("last_modified", 0), reverse=True)
 
-        logger.info(f"📋 Listed {len(transcript_list)} unique transcripts (from vector DB and JSON files)")
-        return {"transcripts": transcript_list, "count": len(transcript_list)}
+        logger.info(f"📋 Listed {len(transcript_files)} transcript files")
+        return {"transcripts": transcript_files, "count": len(transcript_files)}
     except Exception as e:
         logger.error(f"Error listing transcripts: {e}")
         raise HTTPException(
             status_code=500, detail=f"Error listing transcripts: {str(e)}"
-        )
-
-
-@app.post("/transcripts/cleanup-duplicates")
-async def cleanup_duplicate_transcripts(current_user = Depends(get_current_user)):
-    """Remove duplicate transcripts, keeping only the most recent one for each meeting_name"""
-    try:
-        from vector_db.vector_store import get_redis_client
-        import json
-        
-        client = get_redis_client()
-        keys = client.keys("transcript:*")
-        
-        # Group transcripts by meeting_name
-        meeting_groups = {}  # meeting_name -> list of (key, timestamp)
-        
-        for key in keys:
-            data = client.hgetall(key)
-            stored_user_id = data.get(b'user_id')
-            
-            if stored_user_id and int(stored_user_id.decode('utf-8')) == current_user.id:
-                meeting_name = data.get(b'meeting_name', b'').decode('utf-8')
-                timestamp = int(data.get(b'timestamp', b'0').decode('utf-8'))
-                
-                if meeting_name not in meeting_groups:
-                    meeting_groups[meeting_name] = []
-                meeting_groups[meeting_name].append((key.decode('utf-8'), timestamp))
-        
-        # Delete duplicates, keeping only the most recent
-        deleted_count = 0
-        for meeting_name, transcripts in meeting_groups.items():
-            if len(transcripts) > 1:
-                # Sort by timestamp (newest first)
-                transcripts.sort(key=lambda x: x[1], reverse=True)
-                # Keep the first (most recent), delete the rest
-                for key, _ in transcripts[1:]:
-                    client.delete(key)
-                    deleted_count += 1
-                    logger.info(f"🗑️  Deleted duplicate transcript: {key}")
-        
-        return {
-            "status": "success",
-            "deleted_count": deleted_count,
-            "message": f"Removed {deleted_count} duplicate transcript(s)"
-        }
-    except Exception as e:
-        logger.error(f"Error cleaning up duplicates: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error cleaning up duplicates: {str(e)}"
-        )
-
-
-@app.get("/transcripts/vector")
-async def get_vector_transcript(
-    username: str = Query(..., description="Username to get transcript for"),
-    meeting_name: str = Query(..., description="Meeting name to get transcript for"),
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user),
-):
-    """
-    Get transcript from vector database by username and meeting name.
-    Requires authentication - only the transcript owner or admin can access.
-    """
-    try:
-        # Get user by username
-        user = get_user_by_username(db, username=username)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User '{username}' not found"
-            )
-        
-        user_id = user.id
-        
-        # Check if current user has permission (own transcript or admin)
-        if current_user.id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only access your own transcripts"
-            )
-        
-        # Get Redis client
-        from vector_db.vector_store import get_redis_client
-        import json
-        
-        client = get_redis_client()
-        
-        # Get all transcript keys
-        keys = client.keys("transcript:*")
-        
-        # Search for matching transcript
-        transcript = None
-        for key in keys:
-            # Get hash data (Redis returns bytes when decode_responses=False)
-            data = client.hgetall(key)
-            
-            # Check if this transcript matches user_id and meeting_name
-            stored_user_id = data.get(b'user_id')
-            stored_meeting_name = data.get(b'meeting_name')
-            
-            if stored_user_id and stored_meeting_name:
-                stored_user_id_str = stored_user_id.decode('utf-8')
-                stored_meeting_name_str = stored_meeting_name.decode('utf-8')
-                
-                if int(stored_user_id_str) == user_id and stored_meeting_name_str == meeting_name:
-                    # Found matching transcript
-                    transcript = {
-                        "meeting_id": data.get(b'meeting_id', b'').decode('utf-8'),
-                        "meeting_name": stored_meeting_name_str,
-                        "user_id": user_id,
-                        "username": username,
-                        "timestamp": int(data.get(b'timestamp', b'0').decode('utf-8')),
-                        "speakers": json.loads(data.get(b'speakers', b'[]').decode('utf-8')),
-                        "transcript_text": data.get(b'transcript_text', b'').decode('utf-8'),
-                    }
-                    break
-        
-        if transcript is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Transcript not found for user '{username}' and meeting '{meeting_name}'"
-            )
-        
-        logger.info(
-            f"Retrieved vector transcript: user={username}, meeting={meeting_name}"
-        )
-        
-        return transcript
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving vector transcript: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving transcript: {str(e)}"
         )
 
 
@@ -1880,26 +1207,9 @@ async def update_transcripts_from_main(request: TranscriptUpdateRequest):
     logger.info(
         f"Received transcript update from main.py: {len(request.transcripts)} transcripts for room {request.room_name}"
     )
-    
-    # Get user_id from room mapping
-    user_id = get_user_id_for_room(request.room_name)
-    if user_id is None:
-        logger.warning(
-            f"No user_id found for room {request.room_name}, cannot update transcripts"
-        )
-        return {
-            "status": "error",
-            "message": "No user_id found for this room",
-            "meeting_name": request.room_name,
-        }
-    
-    # Update user-specific transcripts
+    # Clear existing and set new transcripts
     async with transcript_manager.lock:
-        # Initialize user transcripts if not exists
-        if user_id not in transcript_manager.user_transcripts:
-            transcript_manager.user_transcripts[user_id] = []
-        
-        transcript_manager.user_transcripts[user_id] = [
+        transcript_manager.transcripts = [
             (speaker, text, True) for speaker, text in request.transcripts
         ]
 
@@ -1908,13 +1218,12 @@ async def update_transcripts_from_main(request: TranscriptUpdateRequest):
         save_transcript_to_file(request.room_name, request.transcripts)
 
     logger.info(
-        f"Updated transcript manager for user_id={user_id} with {len(transcript_manager.user_transcripts[user_id])} transcripts"
+        f"Updated transcript manager with {len(transcript_manager.transcripts)} transcripts"
     )
     return {
         "status": "ok",
-        "count": len(transcript_manager.user_transcripts[user_id]),
+        "count": len(transcript_manager.transcripts),
         "meeting_name": request.room_name,
-        "user_id": user_id,
     }
 
 
@@ -1928,15 +1237,14 @@ async def generate_token(request: TokenRequest, current_user = Depends(get_curre
     """Generate a LiveKit access token for a room"""
     try:
         from livekit import api
-        from config import LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, validate_livekit_config
 
-        # Validate configuration
-        try:
-            validate_livekit_config()
-        except ValueError as e:
+        api_key = os.getenv("LIVEKIT_API_KEY")
+        api_secret = os.getenv("LIVEKIT_API_SECRET")
+
+        if not api_key or not api_secret:
             raise HTTPException(
                 status_code=500,
-                detail=f"LiveKit API credentials not configured: {str(e)}. Please create a .env.local file in the backend directory with LIVEKIT_API_KEY and LIVEKIT_API_SECRET. See README.md for setup instructions.",
+                detail="LiveKit API credentials not configured. Please create a .env.local file in the backend directory with LIVEKIT_API_KEY and LIVEKIT_API_SECRET. See README.md for setup instructions.",
             )
 
         identity = request.identity
@@ -1946,7 +1254,7 @@ async def generate_token(request: TokenRequest, current_user = Depends(get_curre
             identity = f"user-{uuid.uuid4().hex[:8]}"
 
         token = (
-            api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+            api.AccessToken(api_key, api_secret)
             .with_identity(identity)
             .with_name(identity)
             .with_grants(
@@ -1959,17 +1267,9 @@ async def generate_token(request: TokenRequest, current_user = Depends(get_curre
             )
         )
 
-        # Store room_name -> user_id mapping for later transcript storage
-        try:
-            from room_user_mapping import store_room_user_mapping
-            store_room_user_mapping(request.room_name, current_user.id)
-            logger.info(f"Stored room mapping: {request.room_name} -> user_id {current_user.id}")
-        except Exception as e:
-            logger.warning(f"Failed to store room mapping: {e}")
-
         return {
             "token": token.to_jwt(),
-            "url": LIVEKIT_URL,
+            "url": os.getenv("LIVEKIT_URL", "ws://localhost:7880"),
             "room_name": request.room_name,
             "identity": identity,
         }
@@ -1983,77 +1283,157 @@ async def generate_token(request: TokenRequest, current_user = Depends(get_curre
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def get_transcript_text_for_meeting(meeting_name: str, user_id: int) -> str:
+    """Get transcript text from meeting name for a specific user"""
+    try:
+        import redis
+        
+        # Try to get from Redis first
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                client = redis.from_url(redis_url, decode_responses=False)
+                keys = client.keys("transcript:*")
+                
+                for key in keys:
+                    data = client.hgetall(key)
+                    stored_meeting_name = data.get(b'meeting_name')
+                    stored_user_id = data.get(b'user_id')
+                    
+                    if stored_meeting_name and stored_user_id:
+                        stored_meeting_name_str = stored_meeting_name.decode('utf-8')
+                        stored_user_id_str = int(stored_user_id.decode('utf-8'))
+                        
+                        if stored_meeting_name_str == meeting_name and stored_user_id_str == user_id:
+                            return data.get(b'transcript_text', b'').decode('utf-8')
+            except Exception as redis_error:
+                logger.warning(f"Redis lookup failed: {redis_error}, falling back to JSON file")
+        
+        # Fall back to JSON file
+        transcript_data = load_transcript_from_file(meeting_name)
+        if transcript_data and transcript_data.get("transcripts"):
+            # Convert transcript entries to text format
+            transcript_text = ""
+            for entry in transcript_data["transcripts"]:
+                speaker = entry.get("speaker", "Unknown")
+                text = entry.get("text", "")
+                if text:
+                    transcript_text += f"{speaker}: {text}\n"
+            return transcript_text.strip()
+        
+        return ""
+    except Exception as e:
+        logger.error(f"Error getting transcript text: {e}")
+        return ""
+
+
+class SummaryRequest(BaseModel):
+    meeting_name: str
+
+
+class ChatRequest(BaseModel):
+    meeting_name: str
+    question: str
+    chat_history: Optional[List[Dict[str, str]]] = []
+
+
+@app.post("/chatbot/summary")
+async def generate_transcript_summary(
+    request: SummaryRequest,
+    current_user = Depends(get_current_user)
+):
+    """Generate summary for a transcript"""
+    try:
+        from chatbot import generate_summary
+        
+        transcript_text = get_transcript_text_for_meeting(request.meeting_name, current_user.id)
+        
+        if not transcript_text:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Transcript not found for meeting: {request.meeting_name}"
+            )
+        
+        summary = await generate_summary(transcript_text)
+        
+        return {
+            "meeting_name": request.meeting_name,
+            "summary": summary
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
+
+
+@app.post("/chatbot/chat")
+async def chat_with_transcript(
+    request: ChatRequest,
+    current_user = Depends(get_current_user)
+):
+    """Chat with transcript using streaming"""
+    try:
+        from chatbot import stream_chat_response, generate_summary
+        from langchain_core.messages import HumanMessage, AIMessage
+        
+        transcript_text = get_transcript_text_for_meeting(request.meeting_name, current_user.id)
+        
+        if not transcript_text:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Transcript not found for meeting: {request.meeting_name}"
+            )
+        
+        # Convert chat_history from dict format to BaseMessage format
+        chat_history = []
+        for msg in request.chat_history or []:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                chat_history.append(HumanMessage(content=content))
+            elif role == "assistant":
+                chat_history.append(AIMessage(content=content))
+        
+        # Generate summary if not already provided (we'll generate it on first request)
+        # For now, we'll generate it each time - could be optimized to cache
+        summary = await generate_summary(transcript_text)
+        
+        async def generate():
+            async for chunk in stream_chat_response(
+                transcript_text,
+                summary,
+                chat_history,
+                request.question,
+                meeting_name=request.meeting_name
+            ):
+                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            yield "data: [DONE]\n\n"
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in chat: {e}")
+        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
+
+
 @app.websocket("/ws/transcripts")
 async def websocket_endpoint(websocket: WebSocket):
     client_host = websocket.client.host if websocket.client else "unknown"
 
-    # Extract token from query string (FastAPI WebSocket doesn't support Query() directly)
-    token = None
-    if websocket.url.query:
-        from urllib.parse import parse_qs
-        query_params = parse_qs(websocket.url.query)
-        token = query_params.get("token", [None])[0] if query_params.get("token") else None
-
-    # Authenticate WebSocket connection
-    if not token:
-        logger.warning(f"WebSocket connection rejected from {client_host}: No token provided")
-        try:
-            await websocket.close(code=1008, reason="Authentication required")
-        except Exception:
-            pass
-        return
-    
-    # Verify token and extract username
-    payload = verify_token(token)
-    if not payload:
-        logger.warning(f"WebSocket connection rejected from {client_host}: Invalid token")
-        try:
-            await websocket.close(code=1008, reason="Invalid token")
-        except Exception:
-            pass
-        return
-    
-    username = payload.get("sub")  # JWT 'sub' field contains username
-    if not username:
-        logger.warning(f"WebSocket connection rejected from {client_host}: No username in token")
-        try:
-            await websocket.close(code=1008, reason="Invalid token payload")
-        except Exception:
-            pass
-        return
-    
-    # Look up user by username to get user_id
-    db_gen = get_db()
     try:
-        db = next(db_gen)
-        user = get_user_by_username(db, username=username)
-        if not user:
-            logger.warning(f"WebSocket connection rejected from {client_host}: User not found: {username}")
-            try:
-                await websocket.close(code=1008, reason="User not found")
-            except Exception:
-                pass
-            return
-        
-        user_id = user.id
-    except Exception as e:
-        logger.error(f"Failed to look up user for WebSocket connection: {e}")
-        try:
-            await websocket.close(code=1008, reason="Database error")
-        except Exception:
-            pass
-        return
-    finally:
-        # Close the database session by exhausting the generator
-        try:
-            next(db_gen, None)
-        except StopIteration:
-            pass
-    
-    try:
-        await transcript_manager.connect(websocket, int(user_id))
+        await transcript_manager.connect(websocket)
         logger.info(
-            f"WebSocket client connected from {client_host} (user_id={user_id}). Total connections: {len(transcript_manager.connections)}"
+            f"WebSocket client connected from {client_host}. Total connections: {len(transcript_manager.connections)}"
         )
     except Exception as e:
         logger.error(f"Failed to accept WebSocket connection from {client_host}: {e}")
@@ -2079,156 +1459,56 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Client is requesting the complete transcript
                         room_name = message.get("room_name", "Meeting")
                         logger.info(
-                            f"🎯 Client {client_host} (user_id={user_id}) requested transcript for room: {room_name}"
+                            f"🎯 Client {client_host} requested transcript for room: {room_name}"
                         )
 
-                        # Validate user ownership of the transcript
-                        file_user_id = get_user_id_for_room(room_name)
-                        if file_user_id and file_user_id != user_id:
-                            logger.warning(
-                                f"⚠️  User {user_id} attempted to access transcript for room {room_name} owned by user {file_user_id}"
+                        # Try to load from file first
+                        transcript_data = load_transcript_from_file(room_name)
+                        if transcript_data:
+                            # Send from file
+                            logger.info(
+                                f"📖 Loaded transcript from file: {room_name}.json ({transcript_data.get('total_entries', 0)} entries)"
                             )
-                            await websocket.send_json({
-                                "type": "error",
-                                "message": "Access denied: This transcript belongs to another user"
-                            })
-                            continue
+                            message_to_send = {
+                                "type": "complete_transcript",
+                                "meeting_title": transcript_data.get(
+                                    "meeting_name", room_name
+                                ),
+                                "transcripts": transcript_data.get("transcripts", []),
+                            }
 
-                        transcript_found = False
-                        
-                        # First, try to get from vector database
-                        try:
-                            from vector_db.vector_store import get_redis_client
-                            import json as json_module
-                            
-                            client = get_redis_client()
-                            keys = client.keys("transcript:*")
-                            
-                            # Search for matching transcript by meeting_name and user_id
-                            for key in keys:
-                                data = client.hgetall(key)
-                                stored_meeting_name = data.get(b'meeting_name')
-                                stored_user_id = data.get(b'user_id')
-                                
-                                if stored_meeting_name and stored_user_id:
-                                    stored_meeting_name_str = stored_meeting_name.decode('utf-8')
-                                    stored_user_id_str = int(stored_user_id.decode('utf-8'))
-                                    
-                                    if stored_meeting_name_str == room_name and stored_user_id_str == user_id:
-                                        # Found in vector DB - parse transcript_text back to transcript entries
-                                        transcript_text = data.get(b'transcript_text', b'').decode('utf-8')
-                                        
-                                        # Parse transcript_text back to individual entries
-                                        # Format: "Speaker 1: text\nSpeaker 2: text"
-                                        transcript_entries = []
-                                        for line in transcript_text.split('\n'):
-                                            if ':' in line:
-                                                parts = line.split(':', 1)
-                                                if len(parts) == 2:
-                                                    speaker = parts[0].strip()
-                                                    text = parts[1].strip()
-                                                    if text:
-                                                        transcript_entries.append({
-                                                            "speaker": speaker,
-                                                            "text": text,
-                                                            "is_final": True
-                                                        })
-                                        
-                                        message_to_send = {
-                                            "type": "complete_transcript",
-                                            "meeting_title": room_name,
-                                            "transcripts": transcript_entries,
-                                        }
-                                        
-                                        try:
-                                            await websocket.send_json(message_to_send)
-                                            logger.info(
-                                                f"✅ Sent transcript from vector DB to {client_host} (user_id={user_id}, {len(transcript_entries)} entries)"
-                                            )
-                                            transcript_found = True
-                                        except Exception as e:
-                                            logger.error(f"Error sending transcript to client: {e}")
-                                            transcript_manager.disconnect(websocket)
-                                        break
-                        except Exception as e:
-                            logger.warning(f"Error fetching from vector DB, trying file: {e}")
-                        
-                        # If not found in vector DB, try to load from file
-                        if not transcript_found:
-                            transcript_data = load_transcript_from_file(room_name)
-                            if transcript_data:
-                                # Verify ownership from file metadata if available
-                                file_user_id_from_data = transcript_data.get("user_id")
-                                if file_user_id_from_data and int(file_user_id_from_data) != user_id:
-                                    logger.warning(
-                                        f"⚠️  User {user_id} attempted to access transcript file for room {room_name} owned by user {file_user_id_from_data}"
-                                    )
-                                    await websocket.send_json({
-                                        "type": "error",
-                                        "message": "Access denied: This transcript belongs to another user"
-                                    })
-                                    continue
-                                
-                                # Send from file to this user only
-                                logger.info(
-                                    f"📖 Loaded transcript from file: {room_name}.json ({transcript_data.get('total_entries', 0)} entries)"
-                                )
-                                message_to_send = {
-                                    "type": "complete_transcript",
-                                    "meeting_title": transcript_data.get(
-                                        "meeting_name", room_name
-                                    ),
-                                    "transcripts": transcript_data.get("transcripts", []),
-                                }
-
-                                # Send only to this specific connection (user)
+                            disconnected = set()
+                            for connection in transcript_manager.connections:
                                 try:
-                                    await websocket.send_json(message_to_send)
-                                    logger.info(
-                                        f"✅ Sent transcript from file to {client_host} (user_id={user_id})"
-                                    )
-                                    transcript_found = True
+                                    await connection.send_json(message_to_send)
                                 except Exception as e:
                                     logger.error(
                                         f"Error sending transcript to client: {e}"
                                     )
-                                    transcript_manager.disconnect(websocket)
-                        
-                        # If still not found, fall back to memory (user-specific)
-                        if not transcript_found:
-                            user_transcripts = transcript_manager.user_transcripts.get(user_id, [])
+                                    disconnected.add(connection)
+
+                            for conn in disconnected:
+                                transcript_manager.disconnect(conn)
                             logger.info(
-                                f"📊 Current transcripts in manager for user_id={user_id}: {len(user_transcripts)}"
+                                f"✅ Sent transcript from file to {client_host}"
                             )
-                            if user_transcripts:
+                        else:
+                            # Fall back to memory
+                            logger.info(
+                                f"📊 Current transcripts in manager: {len(transcript_manager.transcripts)}"
+                            )
+                            if transcript_manager.transcripts:
                                 logger.info(
-                                    f"📝 Sending {len(user_transcripts)} transcripts from memory to {client_host} (user_id={user_id})"
+                                    f"📝 Sending {len(transcript_manager.transcripts)} transcripts from memory to {client_host}"
                                 )
-                                message_to_send = {
-                                    "type": "complete_transcript",
-                                    "meeting_title": room_name,
-                                    "transcripts": [
-                                        {"speaker": sp, "text": txt, "is_final": is_final}
-                                        for sp, txt, is_final in user_transcripts
-                                    ],
-                                }
-                                try:
-                                    await websocket.send_json(message_to_send)
-                                    logger.info(
-                                        f"✅ Sent transcript from memory to {client_host} (user_id={user_id})"
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Error sending transcript to client: {e}")
-                                    transcript_manager.disconnect(websocket)
                             else:
                                 logger.warning(
-                                    f"⚠️  No transcripts available for user_id={user_id} in vector DB, file, or memory."
+                                    "⚠️  No transcripts available in API server or file. Transcripts may be in main.py process."
                                 )
-                                await websocket.send_json({
-                                    "type": "complete_transcript",
-                                    "meeting_title": room_name,
-                                    "transcripts": [],
-                                })
+                            await transcript_manager.send_complete_transcript(room_name)
+                            logger.info(
+                                f"✅ Sent complete transcript response to {client_host}"
+                            )
 
                     elif message_type == "watch_transcript":
                         # Client wants to watch a transcript file for real-time updates
@@ -2236,40 +1516,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             "room_name"
                         )
                         if meeting_name:
-                            # Validate user ownership before allowing watch
-                            file_user_id = get_user_id_for_room(meeting_name)
-                            if file_user_id and file_user_id != user_id:
-                                logger.warning(
-                                    f"⚠️  User {user_id} attempted to watch transcript for room {meeting_name} owned by user {file_user_id}"
-                                )
-                                await websocket.send_json({
-                                    "type": "error",
-                                    "message": "Access denied: This transcript belongs to another user"
-                                })
-                                continue
-                            
                             logger.info(
-                                f"👁️  Client {client_host} (user_id={user_id}) wants to watch transcript: {meeting_name}"
+                                f"👁️  Client {client_host} wants to watch transcript: {meeting_name}"
                             )
                             transcript_manager.file_watcher.add_watcher(
                                 meeting_name, websocket
                             )
 
-                            # Also send current transcript if file exists (and user owns it)
+                            # Also send current transcript if file exists
                             transcript_data = load_transcript_from_file(meeting_name)
                             if transcript_data:
-                                # Verify ownership from file metadata if available
-                                file_user_id_from_data = transcript_data.get("user_id")
-                                if file_user_id_from_data and int(file_user_id_from_data) != user_id:
-                                    logger.warning(
-                                        f"⚠️  User {user_id} attempted to watch transcript file for room {meeting_name} owned by user {file_user_id_from_data}"
-                                    )
-                                    await websocket.send_json({
-                                        "type": "error",
-                                        "message": "Access denied: This transcript belongs to another user"
-                                    })
-                                    continue
-                                
                                 message_to_send = {
                                     "type": "complete_transcript",
                                     "meeting_title": transcript_data.get(
@@ -2282,7 +1538,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 try:
                                     await websocket.send_json(message_to_send)
                                     logger.info(
-                                        f"✅ Sent initial transcript to watcher: {meeting_name} (user_id={user_id})"
+                                        f"✅ Sent initial transcript to watcher: {meeting_name}"
                                     )
                                 except Exception as e:
                                     logger.error(
