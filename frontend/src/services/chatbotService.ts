@@ -1,6 +1,7 @@
 import { authService } from './authService';
+import { apiConfig } from '../config/api';
 
-const HTTP_API_URL = import.meta.env.VITE_HTTP_API_URL || import.meta.env.VITE_API_URL?.replace('ws://', 'http://').replace('wss://', 'https://') || 'http://localhost:8000';
+const HTTP_API_URL = apiConfig.httpUrl;
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -8,22 +9,22 @@ export interface ChatMessage {
 }
 
 export interface SummaryResponse {
-  meeting_name: string;
+  meeting_id: string;
   summary: string;
 }
 
 export class ChatbotService {
   /**
-   * Generate summary for a transcript
+   * Generate summary for a transcript using meeting_id
    */
-  async generateSummary(meetingName: string): Promise<SummaryResponse> {
+  async generateSummary(meetingId: string): Promise<SummaryResponse> {
     const response = await fetch(`${HTTP_API_URL}/chatbot/summary`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...authService.getAuthHeaders(),
       },
-      body: JSON.stringify({ meeting_name: meetingName }),
+      body: JSON.stringify({ meeting_id: meetingId }),
     });
 
     if (!response.ok) {
@@ -35,10 +36,10 @@ export class ChatbotService {
   }
 
   /**
-   * Stream chat response from the chatbot
+   * Stream chat response from the chatbot using meeting_id
    */
   async streamChatResponse(
-    meetingName: string,
+    meetingId: string,
     question: string,
     chatHistory: ChatMessage[],
     onChunk: (chunk: string) => void,
@@ -53,7 +54,7 @@ export class ChatbotService {
           ...authService.getAuthHeaders(),
         },
         body: JSON.stringify({
-          meeting_name: meetingName,
+          meeting_id: meetingId,
           question,
           chat_history: chatHistory,
         }),

@@ -1,5 +1,6 @@
 import type { Transcript, TranscriptMessage } from '../types';
 import { authService } from './authService';
+import { apiConfig } from '../config/api';
 
 export class TranscriptService {
   private ws: WebSocket | null = null;
@@ -13,8 +14,9 @@ export class TranscriptService {
   private isIntentionallyDisconnecting = false;
   private apiUrl: string;
 
-  constructor(apiUrl: string = 'ws://localhost:8000') {
-    this.apiUrl = apiUrl;
+  constructor(apiUrl?: string) {
+    // Use provided URL or default to config
+    this.apiUrl = apiUrl || apiConfig.wsUrl;
   }
 
   connect(

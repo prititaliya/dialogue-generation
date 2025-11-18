@@ -1,6 +1,7 @@
 import { authService } from './authService'
+import { apiConfig } from '../config/api'
 
-const API_URL = import.meta.env.VITE_HTTP_API_URL || import.meta.env.VITE_API_URL?.replace('ws://', 'http://').replace('wss://', 'https://') || 'http://localhost:8000'
+const API_URL = apiConfig.httpUrl
 
 export interface TokenResponse {
   token: string
