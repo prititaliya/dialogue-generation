@@ -1,4 +1,6 @@
-const HTTP_API_URL = import.meta.env.VITE_HTTP_API_URL || import.meta.env.VITE_API_URL?.replace('ws://', 'http://').replace('wss://', 'https://') || 'http://localhost:8000'
+import { apiConfig } from '../config/api'
+
+const HTTP_API_URL = apiConfig.httpUrl
 
 export interface User {
   id: number

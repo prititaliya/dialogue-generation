@@ -36,26 +36,56 @@ vector_store = RedisVectorStore(
     embeddings=OpenAIEmbeddings(),
 )
 def get_transcripts_for_user(user_id: int):
-    redis_client = redis.from_url(os.getenv("REDIS_URL"), decode_responses=False)
-    keys = redis_client.keys("transcript:*")
+    """Get all transcripts for a specific user from Redis"""
+    try:
+        redis_client = redis.from_url(os.getenv("REDIS_URL"), decode_responses=False)
+        keys = redis_client.keys("transcript:*")
 
-    transcripts = []
-    for key in keys:
+        transcripts = []
+        for key in keys:
+            try:
+                data = redis_client.hgetall(key)
+                
+                # Skip if no data
+                if not data:
+                    continue
+                
+                # Check if user_id exists and matches
+                stored_by_user_id_bytes = data.get(b'user_id')
+                if stored_by_user_id_bytes is None:
+                    # Skip entries without user_id
+                    continue
+                
+                try:
+                    stored_by_user_id = int(stored_by_user_id_bytes.decode('utf-8'))
+                except (ValueError, AttributeError):
+                    # Skip entries with invalid user_id
+                    continue
+                
+                # Only include transcripts for this user
+                if stored_by_user_id == user_id:
+                    try:
+                        transcripts.append({
+                            'meeting_id': data.get(b'meeting_id', b'').decode('utf-8'),
+                            'meeting_name': data.get(b'meeting_name', b'').decode('utf-8'),
+                            'user_id': user_id,
+                            'timestamp': int(data.get(b'timestamp', b'0').decode('utf-8')),
+                            'speakers': json.loads(data.get(b'speakers', b'[]').decode('utf-8')),
+                            'transcript_text': data.get(b'transcript_text', b'').decode('utf-8'),
+                        })
+                    except (ValueError, json.JSONDecodeError, AttributeError) as e:
+                        # Skip entries with invalid data
+                        print(f"Warning: Skipping transcript with invalid data: {e}")
+                        continue
+            except Exception as e:
+                # Skip entries that cause errors
+                print(f"Warning: Error processing transcript key {key}: {e}")
+                continue
 
-        data = redis_client.hgetall(key)
-        stored_by_user_id = data.get(b'user_id')
-        stored_by_user_id = int(stored_by_user_id.decode('utf-8'))
-        if stored_by_user_id == user_id:
-            transcripts.append({
-                'meeting_id': data.get(b'meeting_id', b'').decode('utf-8'),
-                'meeting_name': data.get(b'meeting_name', b'').decode('utf-8'),
-                'user_id': user_id,
-                'timestamp': int(data.get(b'timestamp', b'0').decode('utf-8')),
-                'speakers': json.loads(data.get(b'speakers', b'[]').decode('utf-8')),
-                'transcript_text': data.get(b'transcript_text', b'').decode('utf-8'),
-            })
-
-    return transcripts
+        return transcripts
+    except Exception as e:
+        print(f"Error getting transcripts for user {user_id}: {e}")
+        return []
 
 def get_transcript_for_meeting(meeting_id: str):
     redis_client = redis.from_url(os.getenv("REDIS_URL"), decode_responses=False)

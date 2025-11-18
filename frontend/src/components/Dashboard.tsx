@@ -7,16 +7,19 @@ import { getLiveKitToken } from '../services/tokenService'
 import { authService } from '../services/authService'
 import type { User } from '../services/authService'
 import { chatbotService, type ChatMessage } from '../services/chatbotService'
+import { apiConfig } from '../config/api'
 
-const WS_API_URL = import.meta.env.VITE_API_URL || 'ws://localhost:8000'
-const HTTP_API_URL = import.meta.env.VITE_HTTP_API_URL || import.meta.env.VITE_API_URL?.replace('ws://', 'http://').replace('wss://', 'https://') || 'http://localhost:8000'
+const WS_API_URL = apiConfig.wsUrl
+const HTTP_API_URL = apiConfig.httpUrl
 
 interface TranscriptFile {
+  meeting_id?: string  // Optional - only for Redis transcripts
   meeting_name: string
   file_name: string
   total_entries: number
   last_modified: number
   isCurrent?: boolean
+  source?: 'redis' | 'file'  // Indicate source
 }
 
 export function Dashboard() {
@@ -32,6 +35,7 @@ export function Dashboard() {
   const realtimeUpdatesEndRef = useRef<HTMLDivElement>(null)
   const [availableTranscripts, setAvailableTranscripts] = useState<TranscriptFile[]>([])
   const [selectedMeeting, setSelectedMeeting] = useState<string | null>(null)
+  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null)  // Store meeting_id for Redis transcripts
   const [loadingTranscripts, setLoadingTranscripts] = useState(false)
   const [initialLoadComplete, setInitialLoadComplete] = useState(false)
   const [user, setUser] = useState<User | null>(null)
@@ -71,7 +75,8 @@ export function Dashboard() {
   
   const [transcriptService] = useState(() => {
     try {
-      return new TranscriptService(WS_API_URL)
+      // Use the centralized config - it will automatically detect the current host
+      return new TranscriptService()
     } catch (err) {
       console.error('Failed to create TranscriptService:', err)
       return null as any
@@ -254,7 +259,7 @@ export function Dashboard() {
     setSummary('')
     setChatMessages([])
     setCurrentQuestion('')
-  }, [selectedMeeting])
+  }, [selectedMeeting, selectedMeetingId])
 
   // Update displayText when transcripts change (for BOTH recording and watching)
   useEffect(() => {
@@ -311,14 +316,22 @@ export function Dashboard() {
     }
   }
 
-  const loadTranscript = async (meetingName: string) => {
+  const loadTranscript = async (transcriptFile: TranscriptFile) => {
+    const meetingName = transcriptFile.meeting_name
+    const meetingId = transcriptFile.meeting_id
+    
     if (selectedMeeting && selectedMeeting !== meetingName && transcriptService) {
       transcriptService.unwatchTranscript(selectedMeeting)
     }
     
     setLoadingTranscripts(true)
     try {
-      const response = await fetch(`${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(meetingName)}`, {
+      // Use meeting_id if available (Redis), otherwise use meeting_name (file)
+      const url = meetingId 
+        ? `${HTTP_API_URL}/transcripts?meeting_id=${encodeURIComponent(meetingId)}`
+        : `${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(meetingName)}`
+      
+      const response = await fetch(url, {
         headers: {
           'Content-Type': 'application/json',
           ...authService.getAuthHeaders(),
@@ -329,6 +342,8 @@ export function Dashboard() {
         setMeetingTitle(data.meeting_name || meetingName)
         setTranscripts(data.transcripts || [])
         setSelectedMeeting(meetingName)
+        // Store meeting_id if available (for Redis transcripts)
+        setSelectedMeetingId(meetingId || data.meeting_id || null)
         
         if (transcriptService) {
           transcriptService.watchTranscript(meetingName)
@@ -349,6 +364,7 @@ export function Dashboard() {
     if (isRecording && roomName && transcriptService) {
       setMeetingTitle(roomName)
       setSelectedMeeting(roomName)
+      setSelectedMeetingId(null)  // Clear meeting_id when starting new recording
       setTranscripts([])
       transcriptService.watchTranscript(roomName)
     } else if (!isRecording && roomName && transcriptService) {
@@ -387,7 +403,7 @@ export function Dashboard() {
           const data = await response.json()
           setAvailableTranscripts(data.transcripts || [])
           if (data.transcripts && data.transcripts.length > 0) {
-            const mostRecent = data.transcripts[0].file_name
+            const mostRecent = data.transcripts[0]
             setLoadingTranscripts(true)
             
             let transcriptController: AbortController | null = null
@@ -401,7 +417,12 @@ export function Dashboard() {
                 }
               }, 10000)
               
-              const transcriptResponse = await fetch(`${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(mostRecent)}`, {
+              // Use meeting_id if available (Redis), otherwise use meeting_name (file)
+              const url = mostRecent.meeting_id
+                ? `${HTTP_API_URL}/transcripts?meeting_id=${encodeURIComponent(mostRecent.meeting_id)}`
+                : `${HTTP_API_URL}/transcripts?meeting_name=${encodeURIComponent(mostRecent.file_name)}`
+              
+              const transcriptResponse = await fetch(url, {
                 headers: {
                   'Content-Type': 'application/json',
                   ...authService.getAuthHeaders(),
@@ -416,9 +437,10 @@ export function Dashboard() {
               
               if (transcriptResponse.ok) {
                 const transcriptData = await transcriptResponse.json()
-                setMeetingTitle(transcriptData.meeting_name || mostRecent)
+                setMeetingTitle(transcriptData.meeting_name || mostRecent.meeting_name)
                 setTranscripts(transcriptData.transcripts || [])
-                setSelectedMeeting(mostRecent)
+                setSelectedMeeting(mostRecent.meeting_name)
+                setSelectedMeetingId(mostRecent.meeting_id || null)
               } else {
                 console.error('Failed to load transcript:', transcriptResponse.status, await transcriptResponse.text())
               }
@@ -661,6 +683,7 @@ export function Dashboard() {
         setAvailableTranscripts(prev => prev.filter(t => t.meeting_name !== meetingName))
         if (selectedMeeting === meetingName) {
           setSelectedMeeting(null)
+          setSelectedMeetingId(null)
           setTranscripts([])
           setMeetingTitle(null)
         }
@@ -1060,7 +1083,7 @@ export function Dashboard() {
           }}>
             {filteredTranscripts.map((transcript) => (
               <div
-                key={transcript.file_name}
+                key={transcript.meeting_id || `${transcript.source || 'file'}-${transcript.file_name}`}
                 style={{
                   padding: '20px',
                   background: selectedMeeting === transcript.file_name 
@@ -1100,7 +1123,7 @@ export function Dashboard() {
                 }}
                 onClick={() => {
                   if (!transcript.isCurrent && !loadingTranscripts) {
-                    loadTranscript(transcript.file_name)
+                    loadTranscript(transcript)
                   }
                 }}
               >
@@ -1325,11 +1348,16 @@ export function Dashboard() {
               </h3>
               <button
                 onClick={async () => {
-                  if (!selectedMeeting) return
+                  if (!selectedMeetingId && !selectedMeeting) return
                   setIsGeneratingSummary(true)
                   setError(null)
                   try {
-                    const result = await chatbotService.generateSummary(selectedMeeting)
+                    // Use meeting_id if available (Redis), otherwise fall back to meeting_name (file)
+                    const meetingId = selectedMeetingId || selectedMeeting
+                    if (!meetingId) {
+                      throw new Error('No meeting ID or name available')
+                    }
+                    const result = await chatbotService.generateSummary(meetingId)
                     setSummary(result.summary)
                   } catch (err) {
                     console.error('Error generating summary:', err)
@@ -1457,7 +1485,7 @@ export function Dashboard() {
             <form
               onSubmit={async (e) => {
                 e.preventDefault()
-                if (!currentQuestion.trim() || isStreaming || !selectedMeeting) return
+                if (!currentQuestion.trim() || isStreaming || (!selectedMeetingId && !selectedMeeting)) return
 
                 const question = currentQuestion.trim()
                 setCurrentQuestion('')
@@ -1480,8 +1508,13 @@ export function Dashboard() {
                 setError(null)
 
                 try {
+                  // Use meeting_id if available (Redis), otherwise fall back to meeting_name (file)
+                  const meetingId = selectedMeetingId || selectedMeeting
+                  if (!meetingId) {
+                    throw new Error('No meeting ID or name available')
+                  }
                   await chatbotService.streamChatResponse(
-                    selectedMeeting,
+                    meetingId,
                     question,
                     updatedChatMessages,
                     (chunk: string) => {

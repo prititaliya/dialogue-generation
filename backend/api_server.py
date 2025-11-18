@@ -1136,11 +1136,79 @@ async def get_transcripts(
     meeting_name: Optional[str] = Query(
         None, description="Meeting name to retrieve transcript for"
     ),
+    meeting_id: Optional[str] = Query(
+        None, description="Meeting ID to retrieve transcript from Redis"
+    ),
     current_user = Depends(get_current_user),
 ):
-    """Get transcripts - either from file (if meeting_name provided) or from memory"""
-    if meeting_name:
-        # Load from file
+    """Get transcripts - from Redis (if meeting_id provided) or from file (if meeting_name provided) or from memory"""
+    # Priority: meeting_id (Redis) > meeting_name (file) > memory
+    if meeting_id:
+        # Load from Redis vector DB
+        try:
+            from chatbot import get_transcript_for_meeting
+            import redis
+            
+            redis_url = os.getenv("REDIS_URL")
+            if redis_url:
+                client = redis.from_url(redis_url, decode_responses=False)
+                data = client.hgetall(f"transcript:{meeting_id}")
+                
+                if data:
+                    # Check if this transcript belongs to the current user
+                    stored_user_id_bytes = data.get(b'user_id')
+                    if stored_user_id_bytes:
+                        stored_user_id = int(stored_user_id_bytes.decode('utf-8'))
+                        if stored_user_id != current_user.id:
+                            raise HTTPException(
+                                status_code=403,
+                                detail="You don't have access to this transcript"
+                            )
+                    
+                    # Get transcript text and convert to format expected by frontend
+                    transcript_text = data.get(b'transcript_text', b'').decode('utf-8')
+                    speakers_json = data.get(b'speakers', b'[]').decode('utf-8')
+                    speakers = json.loads(speakers_json) if speakers_json else []
+                    
+                    # Convert transcript text to entries format
+                    transcripts = []
+                    for line in transcript_text.split('\n'):
+                        if ':' in line:
+                            speaker, text = line.split(':', 1)
+                            if text.strip():
+                                transcripts.append({
+                                    "speaker": speaker.strip(),
+                                    "text": text.strip(),
+                                    "is_final": True
+                                })
+                    
+                    return {
+                        "meeting_id": meeting_id,
+                        "meeting_name": data.get(b'meeting_name', b'').decode('utf-8'),
+                        "transcripts": transcripts,
+                        "total_entries": len(transcripts),
+                        "source": "redis"
+                    }
+                else:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Transcript not found for meeting_id: {meeting_id}",
+                    )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Redis URL not configured"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error loading transcript from Redis: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error loading transcript: {str(e)}"
+            )
+    elif meeting_name:
+        # Load from file (backward compatibility)
         transcript_data = load_transcript_from_file(meeting_name)
         if transcript_data:
             return transcript_data
@@ -1162,9 +1230,41 @@ async def get_transcripts(
 
 @app.get("/transcripts/list")
 async def list_all_transcripts(current_user = Depends(get_current_user)):
-    """List all available transcripts from the transcripts directory"""
+    """List all available transcripts from both Redis vector DB and transcripts directory"""
     try:
         transcript_files = []
+        seen_meeting_ids = set()  # Track meeting_ids from Redis
+        seen_meeting_names = set()  # Track meeting_names to avoid duplicates
+        
+        # First, get transcripts from Redis vector DB for this user
+        try:
+            from chatbot import get_transcripts_for_user
+            redis_transcripts = get_transcripts_for_user(current_user.id)
+            
+            for rt in redis_transcripts:
+                meeting_name = rt.get('meeting_name', '')
+                meeting_id = rt.get('meeting_id', '')
+                if meeting_name and meeting_id and meeting_id not in seen_meeting_ids:
+                    seen_meeting_ids.add(meeting_id)
+                    seen_meeting_names.add(meeting_name)  # Track name to avoid file duplicates
+                    # Count entries from transcript text (approximate)
+                    transcript_text = rt.get('transcript_text', '')
+                    entry_count = len(transcript_text.split('\n')) if transcript_text else 0
+                    
+                    transcript_files.append({
+                        "meeting_id": meeting_id,  # Include meeting_id for Redis transcripts
+                        "meeting_name": meeting_name,
+                        "file_name": meeting_name,
+                        "total_entries": entry_count,
+                        "last_modified": rt.get('timestamp', 0),
+                        "source": "redis",  # Indicate it's from Redis
+                    })
+            
+            logger.info(f"📋 Found {len(redis_transcripts)} transcripts in Redis for user {current_user.id}")
+        except Exception as e:
+            logger.warning(f"Error getting transcripts from Redis: {e}")
+        
+        # Then, get transcripts from JSON files (skip if already in Redis)
         if TRANSCRIPTS_DIR.exists():
             for file_path in TRANSCRIPTS_DIR.glob("*.json"):
                 try:
@@ -1172,12 +1272,19 @@ async def list_all_transcripts(current_user = Depends(get_current_user)):
                         data = json.load(f)
                         # Extract meeting name from filename (remove .json extension)
                         meeting_name = file_path.stem
+                        
+                        # Skip if we already have this meeting from Redis (by name)
+                        if meeting_name in seen_meeting_names:
+                            continue
+                        
+                        seen_meeting_names.add(meeting_name)
                         transcript_files.append(
                             {
                                 "meeting_name": data.get("meeting_name", meeting_name),
                                 "file_name": meeting_name,
                                 "total_entries": data.get("total_entries", 0),
                                 "last_modified": file_path.stat().st_mtime,
+                                "source": "file",  # Indicate it's from file
                             }
                         )
                 except Exception as e:
@@ -1187,7 +1294,7 @@ async def list_all_transcripts(current_user = Depends(get_current_user)):
         # Sort by last modified (newest first)
         transcript_files.sort(key=lambda x: x.get("last_modified", 0), reverse=True)
 
-        logger.info(f"📋 Listed {len(transcript_files)} transcript files")
+        logger.info(f"📋 Listed {len(transcript_files)} total transcripts ({len([t for t in transcript_files if t.get('source') == 'redis'])} from Redis, {len([t for t in transcript_files if t.get('source') == 'file'])} from files)")
         return {"transcripts": transcript_files, "count": len(transcript_files)}
     except Exception as e:
         logger.error(f"Error listing transcripts: {e}")
@@ -1199,6 +1306,90 @@ async def list_all_transcripts(current_user = Depends(get_current_user)):
 class TranscriptUpdateRequest(BaseModel):
     transcripts: List[Tuple[str, str]]
     room_name: str
+
+
+class StopRecordingRequest(BaseModel):
+    meeting_name: str
+
+
+@app.post("/transcripts/stop-recording")
+async def stop_recording(
+    request: StopRecordingRequest,
+    current_user = Depends(get_current_user)
+):
+    """Store transcript to Redis vector DB when recording stops"""
+    try:
+        from vector_db.vector_store import store_transcript
+        
+        meeting_name = request.meeting_name
+        
+        # Get transcript text from file or transcript manager
+        transcript_text = ""
+        speakers = []
+        
+        # Try to get from JSON file first
+        transcript_data = load_transcript_from_file(meeting_name)
+        if transcript_data and transcript_data.get("transcripts"):
+            # Convert transcript entries to text format and collect speakers
+            for entry in transcript_data["transcripts"]:
+                speaker = entry.get("speaker", "Unknown")
+                text = entry.get("text", "")
+                if text:
+                    transcript_text += f"{speaker}: {text}\n"
+                    if speaker not in speakers:
+                        speakers.append(speaker)
+            transcript_text = transcript_text.strip()
+        
+        # If no transcript found in file, try to get from transcript manager
+        if not transcript_text and transcript_manager.transcripts:
+            transcript_list = [(sp, txt) for sp, txt, _ in transcript_manager.transcripts]
+            for speaker, text in transcript_list:
+                if text:
+                    transcript_text += f"{speaker}: {text}\n"
+                    if speaker not in speakers:
+                        speakers.append(speaker)
+            transcript_text = transcript_text.strip()
+        
+        if not transcript_text:
+            logger.warning(f"No transcript found for meeting: {meeting_name}")
+            return {
+                "status": "ok",
+                "message": "No transcript found to store",
+                "stored_to_vector_db": False
+            }
+        
+        # Store to Redis vector DB with user_id
+        meeting_id = store_transcript(
+            user_id=current_user.id,
+            meeting_name=meeting_name,
+            transcript_text=transcript_text,
+            speakers=speakers,
+            timestamp=None,  # Will use current time
+            meeting_id=None  # Will generate UUID
+        )
+        
+        if meeting_id:
+            logger.info(f"✅ Stored transcript to vector DB: meeting_name={meeting_name}, user_id={current_user.id}, meeting_id={meeting_id}")
+            return {
+                "status": "ok",
+                "message": "Transcript stored successfully",
+                "stored_to_vector_db": True,
+                "meeting_id": meeting_id
+            }
+        else:
+            logger.error(f"❌ Failed to store transcript to vector DB: meeting_name={meeting_name}")
+            return {
+                "status": "error",
+                "message": "Failed to store transcript to vector database",
+                "stored_to_vector_db": False
+            }
+            
+    except Exception as e:
+        logger.error(f"Error storing transcript to vector DB: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error storing transcript: {str(e)}"
+        )
 
 
 @app.post("/transcripts/update")
@@ -1283,43 +1474,30 @@ async def generate_token(request: TokenRequest, current_user = Depends(get_curre
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def get_transcript_text_for_meeting(meeting_name: str, user_id: int) -> str:
-    """Get transcript text from meeting name for a specific user"""
+def get_transcript_text_for_meeting(meeting_id: str, user_id: int) -> str:
+    """Get transcript text from meeting_id for a specific user"""
     try:
         import redis
         
-        # Try to get from Redis first
+        # Get from Redis using meeting_id
         redis_url = os.getenv("REDIS_URL")
         if redis_url:
             try:
                 client = redis.from_url(redis_url, decode_responses=False)
-                keys = client.keys("transcript:*")
+                data = client.hgetall(f"transcript:{meeting_id}")
                 
-                for key in keys:
-                    data = client.hgetall(key)
-                    stored_meeting_name = data.get(b'meeting_name')
-                    stored_user_id = data.get(b'user_id')
-                    
-                    if stored_meeting_name and stored_user_id:
-                        stored_meeting_name_str = stored_meeting_name.decode('utf-8')
-                        stored_user_id_str = int(stored_user_id.decode('utf-8'))
-                        
-                        if stored_meeting_name_str == meeting_name and stored_user_id_str == user_id:
+                if data:
+                    # Verify user_id matches
+                    stored_user_id_bytes = data.get(b'user_id')
+                    if stored_user_id_bytes:
+                        stored_user_id = int(stored_user_id_bytes.decode('utf-8'))
+                        if stored_user_id == user_id:
                             return data.get(b'transcript_text', b'').decode('utf-8')
+                        else:
+                            logger.warning(f"User {user_id} attempted to access transcript {meeting_id} owned by user {stored_user_id}")
+                            return ""
             except Exception as redis_error:
-                logger.warning(f"Redis lookup failed: {redis_error}, falling back to JSON file")
-        
-        # Fall back to JSON file
-        transcript_data = load_transcript_from_file(meeting_name)
-        if transcript_data and transcript_data.get("transcripts"):
-            # Convert transcript entries to text format
-            transcript_text = ""
-            for entry in transcript_data["transcripts"]:
-                speaker = entry.get("speaker", "Unknown")
-                text = entry.get("text", "")
-                if text:
-                    transcript_text += f"{speaker}: {text}\n"
-            return transcript_text.strip()
+                logger.warning(f"Redis lookup failed: {redis_error}")
         
         return ""
     except Exception as e:
@@ -1328,11 +1506,11 @@ def get_transcript_text_for_meeting(meeting_name: str, user_id: int) -> str:
 
 
 class SummaryRequest(BaseModel):
-    meeting_name: str
+    meeting_id: str  # Changed from meeting_name to meeting_id
 
 
 class ChatRequest(BaseModel):
-    meeting_name: str
+    meeting_id: str  # Changed from meeting_name to meeting_id
     question: str
     chat_history: Optional[List[Dict[str, str]]] = []
 
@@ -1342,22 +1520,22 @@ async def generate_transcript_summary(
     request: SummaryRequest,
     current_user = Depends(get_current_user)
 ):
-    """Generate summary for a transcript"""
+    """Generate summary for a transcript using meeting_id"""
     try:
         from chatbot import generate_summary
         
-        transcript_text = get_transcript_text_for_meeting(request.meeting_name, current_user.id)
+        transcript_text = get_transcript_text_for_meeting(request.meeting_id, current_user.id)
         
         if not transcript_text:
             raise HTTPException(
                 status_code=404,
-                detail=f"Transcript not found for meeting: {request.meeting_name}"
+                detail=f"Transcript not found for meeting_id: {request.meeting_id}"
             )
         
         summary = await generate_summary(transcript_text)
         
         return {
-            "meeting_name": request.meeting_name,
+            "meeting_id": request.meeting_id,
             "summary": summary
         }
     except HTTPException:
@@ -1372,17 +1550,17 @@ async def chat_with_transcript(
     request: ChatRequest,
     current_user = Depends(get_current_user)
 ):
-    """Chat with transcript using streaming"""
+    """Chat with transcript using streaming - uses meeting_id"""
     try:
         from chatbot import stream_chat_response, generate_summary
         from langchain_core.messages import HumanMessage, AIMessage
         
-        transcript_text = get_transcript_text_for_meeting(request.meeting_name, current_user.id)
+        transcript_text = get_transcript_text_for_meeting(request.meeting_id, current_user.id)
         
         if not transcript_text:
             raise HTTPException(
                 status_code=404,
-                detail=f"Transcript not found for meeting: {request.meeting_name}"
+                detail=f"Transcript not found for meeting_id: {request.meeting_id}"
             )
         
         # Convert chat_history from dict format to BaseMessage format
@@ -1405,7 +1583,7 @@ async def chat_with_transcript(
                 summary,
                 chat_history,
                 request.question,
-                meeting_name=request.meeting_name
+                meeting_name=request.meeting_id  # Pass meeting_id as meeting_name for logging
             ):
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
             yield "data: [DONE]\n\n"
