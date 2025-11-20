@@ -143,27 +143,6 @@ def condtion_chatbot_node(state: State):
 def get_input_graph(state: State):
     return {"question": input("Enter a question: ")}
 
-# Old graph code - commented out as it's not compatible with current langgraph version
-# and not used by the new async API functions
-# graph=StateGraph(State)
-# graph.add_node("chatbot", get_chatbot_graph)
-# graph.add_node("summary", get_summary_graph)
-# graph.add_node("maintain_chat_history", maintain_chat_history_graph)
-# graph.add_node("input", get_input_graph)
-# graph.add_node("condition_chatbot", condtion_chatbot_node)
-# graph.add_edge(START, "summary")
-# 
-# graph.add_edge("summary", "input")
-# graph.add_conditional_edges("input", condtion_chatbot_node,{'chatbot': 'chatbot', 'exit': END})
-# graph.add_edge("chatbot", "maintain_chat_history")
-# graph.add_edge("maintain_chat_history", "input")
-# 
-# 
-# app=graph.compile()
-# init_state={"transcript": get_transcript_for_meeting("1_kdiso_1763149743"), "chat_history": [HumanMessage(content="Hello, how are you?")]}
-# 
-# response=app.invoke(init_state)
-
  
 def init_chatbot(id:str):
     """Legacy function - kept for backward compatibility but not actively used"""

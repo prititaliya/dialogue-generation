@@ -43,9 +43,13 @@ TRANSCRIPTS_DIR = BACKEND_DIR / "transcripts"
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 logger.info(f"📁 Transcripts directory: {TRANSCRIPTS_DIR}")
 
+# In-memory transcript storage (replaces JSON file operations to avoid blocking)
+_transcript_storage: Dict[str, Dict] = {}
+_transcript_storage_lock = asyncio.Lock()
+
 
 def get_transcript_file_path(meeting_name: str) -> Path:
-    """Get the file path for a meeting's transcript"""
+    """Get the file path for a meeting's transcript (kept for backward compatibility)"""
     # Sanitize meeting name to be filesystem-safe
     safe_name = "".join(
         c for c in meeting_name if c.isalnum() or c in ("-", "_", " ")
@@ -56,9 +60,11 @@ def get_transcript_file_path(meeting_name: str) -> Path:
 
 def save_transcript_to_file(
     meeting_name: str, transcripts: List[Tuple[str, str]]
-) -> Path:
-    """Save transcripts to a JSON file"""
-    file_path = get_transcript_file_path(meeting_name)
+) -> str:
+    """
+    Save transcripts to in-memory dictionary (no file I/O to avoid blocking).
+    Function name kept for backward compatibility.
+    """
     transcript_data = {
         "meeting_name": meeting_name,
         "transcripts": [
@@ -67,38 +73,31 @@ def save_transcript_to_file(
         ],
         "total_entries": len(transcripts),
     }
-
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(transcript_data, f, indent=2, ensure_ascii=False)
-
-        logger.info(
-            f"💾 Saved transcript to {file_path.absolute()} ({len(transcripts)} entries)"
-        )
-        logger.info(f"📂 Full path: {file_path.resolve()}")
-        return file_path
-    except Exception as e:
-        logger.error(f"❌ Failed to save transcript to {file_path}: {e}")
-        raise
+    
+    # Store in memory (thread-safe)
+    _transcript_storage[meeting_name] = transcript_data
+    
+    logger.info(
+        f"💾 Saved transcript to memory: {meeting_name} ({len(transcripts)} entries)"
+    )
+    return meeting_name
 
 
 def load_transcript_from_file(meeting_name: str) -> Optional[Dict]:
-    """Load transcript from a JSON file"""
-    file_path = get_transcript_file_path(meeting_name)
-
-    if not file_path.exists():
-        logger.warning(f"📄 Transcript file not found: {file_path}")
-        return None
-
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    """
+    Load transcript from in-memory dictionary (no file I/O to avoid blocking).
+    Function name kept for backward compatibility.
+    """
+    # Load from memory
+    data = _transcript_storage.get(meeting_name)
+    
+    if data:
         logger.info(
-            f"📖 Loaded transcript from {file_path} ({data.get('total_entries', 0)} entries)"
+            f"📖 Loaded transcript from memory: {meeting_name} ({data.get('total_entries', 0)} entries)"
         )
         return data
-    except Exception as e:
-        logger.error(f"❌ Error loading transcript from {file_path}: {e}")
+    else:
+        logger.debug(f"📄 Transcript not found in memory: {meeting_name}")
         return None
 
 
@@ -108,36 +107,17 @@ def update_transcript_incremental(
     text: str,
     is_final: bool = False,
     broadcast: bool = True,
-) -> Path:
+) -> str:
     """
-    Incrementally update transcript JSON file for each word/speech event.
+    Incrementally update transcript in-memory dictionary for each word/speech event.
     - For interim events: Update the last entry if same speaker, or create new entry
     - For final events: Mark current entry as final
+    No file I/O to avoid blocking.
     """
-    # Try to import fcntl for file locking (Unix systems only)
     try:
-        import fcntl
-
-        HAS_FCNTL = True
-    except ImportError:
-        HAS_FCNTL = False  # Windows doesn't have fcntl
-
-    file_path = get_transcript_file_path(meeting_name)
-
-    try:
-        # Load existing data or create new structure
-        if file_path.exists():
-            with open(file_path, "r", encoding="utf-8") as f:
-                # Use file locking to prevent race conditions (Unix only)
-                if HAS_FCNTL:
-                    try:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                        data = json.load(f)
-                    finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                else:
-                    data = json.load(f)
-        else:
+        # Load existing data from memory or create new structure
+        data = _transcript_storage.get(meeting_name)
+        if not data:
             data = {"meeting_name": meeting_name, "transcripts": [], "total_entries": 0}
 
         transcripts = data.get("transcripts", [])
@@ -147,7 +127,7 @@ def update_transcript_incremental(
             text_stripped = text.strip()
             if not text_stripped:
                 # Skip empty text
-                return file_path
+                return meeting_name
 
             if transcripts:
                 last_entry = transcripts[-1]
@@ -174,7 +154,7 @@ def update_transcript_incremental(
                         logger.debug(
                             f"⏭️  Skipping duplicate final transcript: {speaker} - {text_stripped[:30]}..."
                         )
-                        return file_path
+                        return meeting_name
                     elif last_text in text_stripped and len(text_stripped) > len(
                         last_text
                     ):
@@ -211,7 +191,7 @@ def update_transcript_incremental(
                             )
                         else:
                             # Skip duplicate
-                            return file_path
+                            return meeting_name
                 else:
                     # Different speaker - check if this exact text already exists in recent entries
                     is_duplicate = False
@@ -238,7 +218,7 @@ def update_transcript_incremental(
                         )
                     else:
                         # Skip duplicate
-                        return file_path
+                        return meeting_name
             else:
                 # No existing transcripts, create first final entry
                 transcripts.append(
@@ -281,19 +261,11 @@ def update_transcript_incremental(
             [t for t in transcripts if t.get("is_final", False)]
         )
 
-        # Save back to file with locking (if available)
-        with open(file_path, "w", encoding="utf-8") as f:
-            if HAS_FCNTL:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            else:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+        # Save back to memory (no file I/O)
+        _transcript_storage[meeting_name] = data
 
         logger.debug(
-            f"💾 Incrementally updated transcript: {speaker} - {text[:30]}... (final={is_final})"
+            f"💾 Incrementally updated transcript in memory: {speaker} - {text[:30]}... (final={is_final})"
         )
 
         # Broadcast the update to all connected WebSocket clients
@@ -318,13 +290,13 @@ def update_transcript_incremental(
             except Exception as e:
                 logger.warning(f"⚠️  Error broadcasting transcript update: {e}")
 
-        return file_path
+        return meeting_name
 
     except Exception as e:
         logger.error(
-            f"❌ Failed to incrementally update transcript to {file_path}: {e}"
+            f"❌ Failed to incrementally update transcript in memory: {e}"
         )
-        raise
+        return meeting_name
 
 
 # File watcher for transcript files
